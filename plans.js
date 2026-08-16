@@ -165,6 +165,74 @@ function buildPlan(splitKey, daysPerWeek) {
   };
 }
 
+// Builds a plan from a fully custom set of training days, instead of one of the
+// preset SPLIT_DEFINITIONS. customDays: [{ dayLabel, exercises: [{ exerciseId, muscleGroup }, ...] }, ...]
+// Each exercise must already carry its muscleGroup (the caller resolves this,
+// since custom exercises live outside this file's EXERCISES database).
+function buildCustomPlan(customDays) {
+  if (!Array.isArray(customDays) || customDays.length === 0) {
+    throw new Error('Add at least one training day.');
+  }
+  customDays.forEach((d, i) => {
+    if (!d.exercises || d.exercises.length === 0) {
+      throw new Error(`"${d.dayLabel || 'Day ' + (i + 1)}" needs at least one exercise.`);
+    }
+  });
+
+  const daysPerWeek = customDays.length;
+
+  // how many days/week each muscle group is trained in this custom schedule
+  const frequency = {};
+  customDays.forEach((day) => {
+    const musclesThisDay = Array.from(new Set(day.exercises.map((e) => e.muscleGroup)));
+    musclesThisDay.forEach((m) => { frequency[m] = (frequency[m] || 0) + 1; });
+  });
+
+  const weeklyTargets = {};
+  Object.keys(frequency).forEach((m) => {
+    weeklyTargets[m] = targetWeeklySets(m, daysPerWeek);
+  });
+
+  const days = customDays.map((day) => {
+    // Group this day's exercises by muscle group, preserving first-seen order,
+    // so multiple exercises picked for the same muscle share that muscle's set target.
+    const groups = [];
+    const groupIndex = {};
+    day.exercises.forEach((ex) => {
+      if (!(ex.muscleGroup in groupIndex)) {
+        groupIndex[ex.muscleGroup] = groups.length;
+        groups.push({ muscleGroup: ex.muscleGroup, exerciseIds: [] });
+      }
+      groups[groupIndex[ex.muscleGroup]].exerciseIds.push(ex.exerciseId);
+    });
+
+    const dayExercises = [];
+    groups.forEach((g) => {
+      const weeklyTotal = weeklyTargets[g.muscleGroup] || 0;
+      const freq = frequency[g.muscleGroup] || 1;
+      const perOccurrence = Math.max(2, Math.round(weeklyTotal / freq));
+      const n = g.exerciseIds.length;
+      const base = Math.floor(perOccurrence / n);
+      let remainder = perOccurrence - base * n;
+      g.exerciseIds.forEach((exerciseId) => {
+        let targetSets = base;
+        if (remainder > 0) { targetSets += 1; remainder -= 1; }
+        dayExercises.push({ exerciseId, muscleGroup: g.muscleGroup, targetSets: Math.max(1, targetSets) });
+      });
+    });
+
+    return { dayLabel: day.dayLabel, muscles: groups.map((g) => g.muscleGroup), exercises: dayExercises };
+  });
+
+  return {
+    splitKey: 'custom',
+    splitName: 'Custom Split',
+    daysPerWeek,
+    weeklyTargets,
+    days
+  };
+}
+
 if (typeof module !== 'undefined') {
-  module.exports = { SPLIT_DEFINITIONS, listAvailablePlans, targetWeeklySets, buildPlan, pickExercisesForMuscle };
+  module.exports = { SPLIT_DEFINITIONS, listAvailablePlans, targetWeeklySets, buildPlan, pickExercisesForMuscle, buildCustomPlan };
 }

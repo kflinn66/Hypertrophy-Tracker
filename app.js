@@ -5,7 +5,8 @@ const STATE = {
   settings: null,
   meso: null,
   sessions: [],
-  draft: null
+  draft: null,
+  customExercises: []
 };
 
 const TIMER = { remaining: 120, running: false, intervalId: null, total: 120 };
@@ -20,6 +21,7 @@ async function boot() {
   STATE.settings = await DB.getSettings();
   STATE.meso = await DB.getActiveMesocycle();
   STATE.sessions = await DB.getAllSessions();
+  STATE.customExercises = await DB.getAllCustomExercises();
   TIMER.remaining = STATE.settings.restTimerSeconds || 120;
   TIMER.total = TIMER.remaining;
   applyTheme(STATE.settings.theme || 'dark');
@@ -48,7 +50,6 @@ async function renderRoute() {
   switch (hash) {
     case 'dashboard': renderDashboard(container); break;
     case 'log': await renderLog(container); break;
-    case 'library': renderLibrary(container); break;
     case 'progress': renderProgress(container); break;
     case 'settings': renderSettings(container); break;
     case 'setup': renderOnboarding(container, { isChange: true }); break;
@@ -78,7 +79,6 @@ function bottomNavHtml(active) {
   const items = [
     { route: 'dashboard', icon: '▦', label: 'Dashboard' },
     { route: 'log', icon: '✎', label: 'Log' },
-    { route: 'library', icon: '≡', label: 'Library' },
     { route: 'progress', icon: '↗', label: 'Progress' },
     { route: 'settings', icon: '⚙', label: 'Settings' }
   ];
@@ -92,7 +92,15 @@ function escapeHtml(str) {
   return String(str).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
-function exerciseById(id) { return EXERCISES.find((e) => e.id === id); }
+function exerciseById(id) {
+  return EXERCISES.find((e) => e.id === id) || (STATE.customExercises || []).find((e) => e.id === id);
+}
+
+// Built-in + user-created exercises for a given muscle group, built-ins first.
+function combinedExercisesForMuscle(muscleGroup) {
+  const custom = (STATE.customExercises || []).filter((e) => e.muscleGroup === muscleGroup);
+  return exercisesForMuscle(muscleGroup).concat(custom);
+}
 
 // ---------------------------------------------------------------------------
 // Mesocycle status / volume math
@@ -137,13 +145,51 @@ let onboardingDraft = null;
 function renderOnboarding(container, opts) {
   if (!onboardingDraft) {
     onboardingDraft = {
-      splitKey: STATE.meso ? STATE.meso.splitKey : 'upperLower',
-      days: STATE.meso ? STATE.meso.daysPerWeek : 4,
+      mode: STATE.meso && STATE.meso.splitKey === 'custom' ? 'custom' : 'preset',
+      splitKey: STATE.meso && STATE.meso.splitKey !== 'custom' ? STATE.meso.splitKey : 'upperLower',
+      days: STATE.meso && STATE.meso.splitKey !== 'custom' ? STATE.meso.daysPerWeek : 4,
       units: STATE.settings ? STATE.settings.units || 'lbs' : 'lbs',
-      trainingWeeks: STATE.meso ? STATE.meso.trainingWeeks : 4
+      goal: STATE.settings ? STATE.settings.goal || 'hypertrophy' : 'hypertrophy',
+      trainingWeeks: STATE.meso ? STATE.meso.trainingWeeks : 4,
+      customDays: [{ dayLabel: 'Day 1', exercises: [], addMuscle: MUSCLE_GROUP_ORDER[0] }]
     };
   }
   drawOnboarding(container, opts || {});
+}
+
+function customDaysBuilderHtml(customDays) {
+  const dayCards = customDays.map((day, di) => {
+    const musclesSoFar = Array.from(new Set(day.exercises.map((e) => e.muscleGroup)));
+    const muscleLabel = musclesSoFar.length ? musclesSoFar.map((m) => VOLUME_LANDMARKS[m].label).join(' · ') : 'No exercises yet';
+    const exerciseRows = day.exercises.map((ex, exi) => {
+      const exObj = exerciseById(ex.exerciseId);
+      return `<div class="list-row">
+        <div>
+          <div class="primary">${escapeHtml(exObj ? exObj.name : ex.exerciseId)}</div>
+          <div class="secondary">${escapeHtml(VOLUME_LANDMARKS[ex.muscleGroup].label)}</div>
+        </div>
+        <button type="button" class="ghost small" data-role="remove-custom-exercise" data-day="${di}" data-ex="${exi}">&times;</button>
+      </div>`;
+    }).join('');
+    const addMuscle = day.addMuscle || MUSCLE_GROUP_ORDER[0];
+    const muscleOptions = MUSCLE_GROUP_ORDER.map((m) => `<option value="${m}" ${m === addMuscle ? 'selected' : ''}>${VOLUME_LANDMARKS[m].label}</option>`).join('');
+
+    return `<div class="card">
+      <div class="row between">
+        <input type="text" class="day-label-input" data-role="custom-day-label" data-day="${di}" value="${escapeHtml(day.dayLabel)}" placeholder="Day label (e.g. Glutes A)" style="flex:1;background:transparent;border:none;font-size:15px;font-weight:700;padding:0">
+        <button type="button" class="ghost small" data-role="remove-custom-day" data-day="${di}">Remove Day</button>
+      </div>
+      <p class="small muted" style="margin:4px 0 8px">${muscleLabel}</p>
+      ${exerciseRows}
+      <div class="row" style="margin-top:8px">
+        <select data-role="custom-add-muscle" data-day="${di}" style="flex:1">${muscleOptions}</select>
+        <select data-role="custom-add-exercise" data-day="${di}" style="flex:1">${exerciseOptionsHtml(addMuscle, null)}</select>
+      </div>
+      <button type="button" class="secondary block" style="margin-top:8px" data-role="custom-add-exercise-btn" data-day="${di}">+ Add Exercise</button>
+    </div>`;
+  }).join('');
+
+  return dayCards + `<button type="button" class="block secondary" data-role="add-custom-day">+ Add Training Day</button>`;
 }
 
 function drawOnboarding(container, opts) {
@@ -164,50 +210,153 @@ function drawOnboarding(container, opts) {
     `<button type="button" class="${d === onboardingDraft.days ? '' : 'secondary'}" data-role="pick-days" data-days="${d}">${d} days/week</button>`
   ).join(' ');
 
-  const body = `
+  const isCustom = onboardingDraft.mode === 'custom';
+  let n = 0;
+  const num = () => ++n;
+
+  const trainingStyleSection = `
     <div class="card">
-      <h2>${opts.isChange ? 'Change Your Plan' : 'Welcome'}</h2>
-      <p class="small muted">${opts.isChange ? 'This starts a fresh mesocycle. Your training history is kept.' : 'Pick a split style, how many days/week you can train, and we\'ll build your weekly volume targets automatically.'}</p>
+      <h2>${num()}. Training Style</h2>
+      <div class="row">
+        <button type="button" class="${!isCustom ? '' : 'secondary'}" data-role="pick-mode" data-mode="preset">Use a Preset Split</button>
+        <button type="button" class="${isCustom ? '' : 'secondary'}" data-role="pick-mode" data-mode="custom">Build Your Own</button>
+      </div>
+    </div>`;
+
+  const splitSection = isCustom
+    ? `
+    <div class="card">
+      <h2>${num()}. Your Training Days</h2>
+      <p class="small muted">Add as many days as you want, each with its own label and exercises &mdash; nothing here is locked to a fixed split.</p>
     </div>
+    ${customDaysBuilderHtml(onboardingDraft.customDays)}`
+    : `
     <div class="card">
-      <h2>1. Split Style</h2>
+      <h2>${num()}. Split Style</h2>
       <div class="choice-grid">${splitCards}</div>
     </div>
     <div class="card">
-      <h2>2. Days Per Week</h2>
+      <h2>${num()}. Days Per Week</h2>
       <div class="row">${dayButtons}</div>
-    </div>
+    </div>`;
+
+  const goalSection = `
     <div class="card">
-      <h2>3. Units</h2>
+      <h2>${num()}. Training Goal</h2>
+      <div class="row">
+        <button type="button" class="${onboardingDraft.goal === 'hypertrophy' ? '' : 'secondary'}" data-role="pick-goal" data-goal="hypertrophy">Growth</button>
+        <button type="button" class="${onboardingDraft.goal === 'strength' ? '' : 'secondary'}" data-role="pick-goal" data-goal="strength">Strength</button>
+      </div>
+      <p class="small muted" style="margin-top:8px">Sets the default rep range and target RIR used for progression suggestions. You can fine-tune these later in Settings.</p>
+    </div>`;
+
+  const unitsSection = `
+    <div class="card">
+      <h2>${num()}. Units</h2>
       <div class="row">
         <button type="button" class="${onboardingDraft.units === 'lbs' ? '' : 'secondary'}" data-role="pick-units" data-units="lbs">lbs</button>
         <button type="button" class="${onboardingDraft.units === 'kg' ? '' : 'secondary'}" data-role="pick-units" data-units="kg">kg</button>
       </div>
-    </div>
+    </div>`;
+
+  const mesoSection = `
     <div class="card">
-      <h2>4. Mesocycle Length</h2>
+      <h2>${num()}. Mesocycle Length</h2>
       <div class="field">
         <label>Training weeks before deload (a deload week is always added after)</label>
         <input type="number" min="3" max="8" id="trainingWeeksInput" value="${onboardingDraft.trainingWeeks}">
       </div>
+    </div>`;
+
+  const body = `
+    <div class="card">
+      <h2>${opts.isChange ? 'Change Your Plan' : 'Welcome'}</h2>
+      <p class="small muted">${opts.isChange ? 'This starts a fresh mesocycle. Your training history is kept.' : 'Pick a preset split or build your own training days, and we\'ll build your weekly volume targets automatically.'}</p>
     </div>
+    ${trainingStyleSection}
+    ${splitSection}
+    ${goalSection}
+    ${unitsSection}
+    ${mesoSection}
     <button class="block" data-role="confirm-onboarding">${opts.isChange ? 'Start New Mesocycle' : 'Create My Plan'}</button>
     ${opts.isChange ? `<button class="block secondary" style="margin-top:8px" data-role="cancel-onboarding">Cancel</button>` : ''}
   `;
 
   container.innerHTML = `<div class="appbar"><div><h1>${opts.isChange ? 'Change Plan' : 'Hypertrophy Tracker'}</h1></div></div><div class="view">${body}</div>${(STATE.settings && STATE.settings.onboarded) ? bottomNavHtml('') : ''}`;
 
+  container.querySelectorAll('[data-role="pick-mode"]').forEach((el) => {
+    el.addEventListener('click', () => {
+      onboardingDraft.mode = el.dataset.mode;
+      if (onboardingDraft.mode === 'custom' && (!onboardingDraft.customDays || onboardingDraft.customDays.length === 0)) {
+        onboardingDraft.customDays = [{ dayLabel: 'Day 1', exercises: [], addMuscle: MUSCLE_GROUP_ORDER[0] }];
+      }
+      drawOnboarding(container, opts);
+    });
+  });
   container.querySelectorAll('[data-role="pick-split"]').forEach((el) => {
     el.addEventListener('click', () => { onboardingDraft.splitKey = el.dataset.key; drawOnboarding(container, opts); });
   });
   container.querySelectorAll('[data-role="pick-days"]').forEach((el) => {
     el.addEventListener('click', () => { onboardingDraft.days = parseInt(el.dataset.days, 10); drawOnboarding(container, opts); });
   });
+  container.querySelectorAll('[data-role="pick-goal"]').forEach((el) => {
+    el.addEventListener('click', () => { onboardingDraft.goal = el.dataset.goal; drawOnboarding(container, opts); });
+  });
   container.querySelectorAll('[data-role="pick-units"]').forEach((el) => {
     el.addEventListener('click', () => { onboardingDraft.units = el.dataset.units; drawOnboarding(container, opts); });
   });
   const twInput = container.querySelector('#trainingWeeksInput');
   if (twInput) twInput.addEventListener('input', () => { onboardingDraft.trainingWeeks = parseInt(twInput.value, 10) || 4; });
+
+  // ---- custom day builder wiring ----
+  container.querySelectorAll('[data-role="custom-day-label"]').forEach((el) => {
+    el.addEventListener('input', () => {
+      const di = parseInt(el.dataset.day, 10);
+      onboardingDraft.customDays[di].dayLabel = el.value;
+    });
+  });
+  container.querySelectorAll('[data-role="remove-custom-day"]').forEach((el) => {
+    el.addEventListener('click', () => {
+      const di = parseInt(el.dataset.day, 10);
+      onboardingDraft.customDays.splice(di, 1);
+      if (onboardingDraft.customDays.length === 0) {
+        onboardingDraft.customDays.push({ dayLabel: 'Day 1', exercises: [], addMuscle: MUSCLE_GROUP_ORDER[0] });
+      }
+      drawOnboarding(container, opts);
+    });
+  });
+  container.querySelectorAll('[data-role="add-custom-day"]').forEach((el) => {
+    el.addEventListener('click', () => {
+      onboardingDraft.customDays.push({ dayLabel: `Day ${onboardingDraft.customDays.length + 1}`, exercises: [], addMuscle: MUSCLE_GROUP_ORDER[0] });
+      drawOnboarding(container, opts);
+    });
+  });
+  container.querySelectorAll('[data-role="custom-add-muscle"]').forEach((sel) => {
+    sel.addEventListener('change', () => {
+      const di = parseInt(sel.dataset.day, 10);
+      onboardingDraft.customDays[di].addMuscle = sel.value;
+      const exSel = container.querySelector(`[data-role="custom-add-exercise"][data-day="${di}"]`);
+      if (exSel) exSel.innerHTML = exerciseOptionsHtml(sel.value, null);
+    });
+  });
+  container.querySelectorAll('[data-role="custom-add-exercise-btn"]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const di = parseInt(btn.dataset.day, 10);
+      const muscleSel = container.querySelector(`[data-role="custom-add-muscle"][data-day="${di}"]`);
+      const exSel = container.querySelector(`[data-role="custom-add-exercise"][data-day="${di}"]`);
+      if (!exSel || !exSel.value) return;
+      onboardingDraft.customDays[di].exercises.push({ exerciseId: exSel.value, muscleGroup: muscleSel.value });
+      drawOnboarding(container, opts);
+    });
+  });
+  container.querySelectorAll('[data-role="remove-custom-exercise"]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const di = parseInt(btn.dataset.day, 10);
+      const exi = parseInt(btn.dataset.ex, 10);
+      onboardingDraft.customDays[di].exercises.splice(exi, 1);
+      drawOnboarding(container, opts);
+    });
+  });
 
   const confirmBtn = container.querySelector('[data-role="confirm-onboarding"]');
   if (confirmBtn) confirmBtn.addEventListener('click', () => completeOnboarding());
@@ -218,15 +367,29 @@ function drawOnboarding(container, opts) {
 
 async function completeOnboarding() {
   const draft = onboardingDraft;
-  const plan = buildPlan(draft.splitKey, draft.days);
+  let plan;
+  if (draft.mode === 'custom') {
+    if (!draft.customDays || draft.customDays.length === 0) { alert('Add at least one training day.'); return; }
+    for (const d of draft.customDays) {
+      if (!d.exercises || d.exercises.length === 0) { alert(`Add at least one exercise to "${d.dayLabel}".`); return; }
+    }
+    try {
+      plan = buildCustomPlan(draft.customDays.map((d) => ({ dayLabel: d.dayLabel || 'Day', exercises: d.exercises })));
+    } catch (err) {
+      alert(err.message);
+      return;
+    }
+  } else {
+    plan = buildPlan(draft.splitKey, draft.days);
+  }
 
   if (STATE.meso) {
     await DB.updateMesocycle(STATE.meso.id, { active: false });
   }
 
   const newMeso = {
-    splitKey: draft.splitKey,
-    daysPerWeek: draft.days,
+    splitKey: draft.mode === 'custom' ? 'custom' : draft.splitKey,
+    daysPerWeek: draft.mode === 'custom' ? draft.customDays.length : draft.days,
     trainingWeeks: Math.max(1, draft.trainingWeeks || 4),
     startDate: new Date().toISOString(),
     plan,
@@ -237,12 +400,14 @@ async function completeOnboarding() {
   newMeso.id = id;
   STATE.meso = newMeso;
 
+  const goalPreset = GOAL_PRESETS[draft.goal] || GOAL_PRESETS.hypertrophy;
   await DB.saveSettings({
     onboarded: true,
     units: draft.units,
-    targetRIR: (STATE.settings && STATE.settings.targetRIR) || DEFAULT_TARGET_RIR,
-    repRangeMin: (STATE.settings && STATE.settings.repRangeMin) || DEFAULT_REP_RANGE.min,
-    repRangeMax: (STATE.settings && STATE.settings.repRangeMax) || DEFAULT_REP_RANGE.max,
+    goal: draft.goal,
+    targetRIR: goalPreset.targetRIR,
+    repRangeMin: goalPreset.repRangeMin,
+    repRangeMax: goalPreset.repRangeMax,
     restTimerSeconds: (STATE.settings && STATE.settings.restTimerSeconds) || 120
   });
   STATE.settings = await DB.getSettings();
@@ -411,7 +576,7 @@ async function renderLog(container) {
 }
 
 function exerciseOptionsHtml(muscleGroup, selectedId) {
-  return exercisesForMuscle(muscleGroup).map((ex) =>
+  return combinedExercisesForMuscle(muscleGroup).map((ex) =>
     `<option value="${ex.id}" ${ex.id === selectedId ? 'selected' : ''}>${escapeHtml(ex.name)} (${ex.equipment})</option>`
   ).join('');
 }
@@ -511,6 +676,7 @@ function drawLog(container, draft, status) {
 }
 
 function wireLogEvents(container, draft) {
+  const AUTOFILL_FIELDS = ['weight', 'reps', 'rir'];
   container.querySelectorAll('input.cell-input').forEach((input) => {
     input.addEventListener('input', () => {
       const ei = parseInt(input.dataset.entry, 10);
@@ -522,6 +688,25 @@ function wireLogEvents(container, draft) {
         const row = input.closest('.set-row');
         const check = row && row.querySelector('.set-check');
         if (check) check.classList.toggle('done', input.value !== '');
+      }
+      // Carry this value forward to the next set's same field, but only if that
+      // next field is still untouched -- so editing set 2 after it was auto-filled
+      // from set 1 will in turn carry forward into set 3, and so on.
+      if (AUTOFILL_FIELDS.includes(field) && input.value !== '') {
+        const nextSet = draft.entries[ei].sets[si + 1];
+        if (nextSet && (nextSet[field] === '' || nextSet[field] === null || nextSet[field] === undefined)) {
+          nextSet[field] = input.value;
+          const nextInput = container.querySelector(`input.cell-input[data-entry="${ei}"][data-set="${si + 1}"][data-field="${field}"]`);
+          if (nextInput) {
+            nextInput.value = input.value;
+            if (field === 'reps') {
+              const nextRow = nextInput.closest('.set-row');
+              const nextCheck = nextRow && nextRow.querySelector('.set-check');
+              if (nextCheck) nextCheck.classList.toggle('done', input.value !== '');
+            }
+          }
+          scheduleSave();
+        }
       }
     });
   });
@@ -578,8 +763,8 @@ function wireLogEvents(container, draft) {
       const exerciseId = addExerciseSelect.value;
       if (!exerciseId) return;
       draft.entries.push({
-        exerciseId, muscleGroup, targetSets: 3,
-        sets: Array.from({ length: 3 }, () => ({ weight: '', reps: '', rir: '', tempo: '', notes: '' }))
+        exerciseId, muscleGroup, targetSets: 2,
+        sets: Array.from({ length: 2 }, () => ({ weight: '', reps: '', rir: '', tempo: '', notes: '' }))
       });
       scheduleSave();
       drawLog(container, draft, mesoStatus(STATE.meso, STATE.sessions));
@@ -665,68 +850,6 @@ function resetTimer() {
   TIMER.total = TIMER.remaining;
   const display = document.getElementById('timerDisplay');
   if (display) display.textContent = formatTime(TIMER.remaining);
-}
-
-// ---------------------------------------------------------------------------
-// Exercise Library
-// ---------------------------------------------------------------------------
-function renderLibrary(container) {
-  drawLibrary(container, { muscle: 'all', equipment: 'all', search: '' });
-}
-
-function drawLibrary(container, filters) {
-  let list = EXERCISES.slice();
-  if (filters.muscle !== 'all') list = list.filter((e) => e.muscleGroup === filters.muscle);
-  if (filters.equipment !== 'all') list = list.filter((e) => e.equipment === filters.equipment);
-  if (filters.search) {
-    const q = filters.search.toLowerCase();
-    list = list.filter((e) => e.name.toLowerCase().includes(q));
-  }
-  list.sort((a, b) => a.name.localeCompare(b.name));
-
-  const muscleOptions = ['<option value="all">All Muscles</option>'].concat(
-    MUSCLE_GROUP_ORDER.map((m) => `<option value="${m}" ${filters.muscle === m ? 'selected' : ''}>${VOLUME_LANDMARKS[m].label}</option>`)
-  ).join('');
-  const equipmentOptions = ['<option value="all">All Equipment</option>'].concat(
-    EQUIPMENT_TYPES.map((eq) => `<option value="${eq}" ${filters.equipment === eq ? 'selected' : ''}>${eq[0].toUpperCase() + eq.slice(1)}</option>`)
-  ).join('');
-
-  const rows = list.map((e) => `<div class="list-row">
-    <div>
-      <div class="primary">${escapeHtml(e.name)}</div>
-      <div class="secondary">
-        <span class="tag">${escapeHtml(VOLUME_LANDMARKS[e.muscleGroup].label)}</span>
-        <span class="tag">${escapeHtml(e.equipment)}</span>
-      </div>
-    </div>
-    <span class="trailing">${e.compound ? 'Compound' : 'Isolation'}</span>
-  </div>`).join('');
-
-  const body = `
-    <div class="card">
-      <div class="field"><input type="text" id="librarySearch" placeholder="Search exercises…" value="${escapeHtml(filters.search)}"></div>
-      <div class="row">
-        <select id="libraryMuscle" style="flex:1">${muscleOptions}</select>
-        <select id="libraryEquipment" style="flex:1">${equipmentOptions}</select>
-      </div>
-    </div>
-    <div class="card">
-      ${rows || '<p class="empty-state">No exercises match.</p>'}
-      <p class="small muted" style="margin-top:8px">${list.length} exercises</p>
-    </div>
-  `;
-
-  container.innerHTML = appShell(body, 'library', 'Exercise Library', `${EXERCISES.length} exercises total`);
-
-  const searchInput = container.querySelector('#librarySearch');
-  const muscleSelect = container.querySelector('#libraryMuscle');
-  const equipmentSelect = container.querySelector('#libraryEquipment');
-  const update = () => drawLibrary(container, { muscle: muscleSelect.value, equipment: equipmentSelect.value, search: searchInput.value });
-  searchInput.addEventListener('input', update);
-  muscleSelect.addEventListener('change', update);
-  equipmentSelect.addEventListener('change', update);
-  searchInput.focus();
-  searchInput.selectionStart = searchInput.selectionEnd = searchInput.value.length;
 }
 
 // ---------------------------------------------------------------------------
@@ -820,6 +943,49 @@ function renderSettings(container) {
     </div>
 
     <div class="card">
+      <h2>Training Goal</h2>
+      <div class="row" id="goalToggle">
+        <button type="button" class="goal-btn ${(s.goal || 'hypertrophy') === 'hypertrophy' ? '' : 'secondary'}" data-goal-value="hypertrophy">Growth</button>
+        <button type="button" class="goal-btn ${s.goal === 'strength' ? '' : 'secondary'}" data-goal-value="strength">Strength</button>
+      </div>
+      <p class="small muted" style="margin-top:8px">Changing this updates your target RIR and rep range below to that goal's defaults.</p>
+    </div>
+
+    <div class="card">
+      <h2>Your Exercises</h2>
+      <p class="small muted">Custom exercises show up alongside the built-in database anywhere you pick or swap an exercise.</p>
+      ${(STATE.customExercises && STATE.customExercises.length) ? STATE.customExercises.map((e) => `<div class="list-row">
+        <div>
+          <div class="primary">${escapeHtml(e.name)}</div>
+          <div class="secondary">
+            <span class="tag">${escapeHtml(VOLUME_LANDMARKS[e.muscleGroup].label)}</span>
+            <span class="tag">${escapeHtml(e.equipment)}</span>
+            <span class="tag">${e.compound ? 'Compound' : 'Isolation'}</span>
+          </div>
+        </div>
+        <button type="button" class="ghost small" data-role="delete-custom-exercise" data-id="${e.id}">Delete</button>
+      </div>`).join('') : '<p class="empty-state">No custom exercises yet.</p>'}
+      <div class="field" style="margin-top:12px">
+        <label>Name</label>
+        <input type="text" id="newExName" placeholder="e.g. Cable Chest Press">
+      </div>
+      <div class="row">
+        <div class="field" style="flex:1">
+          <label>Muscle Group</label>
+          <select id="newExMuscle">${MUSCLE_GROUP_ORDER.map((m) => `<option value="${m}">${VOLUME_LANDMARKS[m].label}</option>`).join('')}</select>
+        </div>
+        <div class="field" style="flex:1">
+          <label>Equipment</label>
+          <select id="newExEquipment">${EQUIPMENT_TYPES.map((eq) => `<option value="${eq}">${eq[0].toUpperCase() + eq.slice(1)}</option>`).join('')}</select>
+        </div>
+      </div>
+      <div class="field">
+        <label><input type="checkbox" id="newExCompound" style="width:auto;margin-right:6px">Compound movement</label>
+      </div>
+      <button type="button" class="secondary block" id="addCustomExerciseBtn">+ Create Exercise</button>
+    </div>
+
+    <div class="card">
       <h2>Preferences</h2>
       <div class="field">
         <label>Units</label>
@@ -877,6 +1043,42 @@ function renderSettings(container) {
     });
   });
 
+  container.querySelectorAll('#goalToggle .goal-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const goal = btn.dataset.goalValue;
+      const preset = GOAL_PRESETS[goal] || GOAL_PRESETS.hypertrophy;
+      await DB.saveSettings({ goal, targetRIR: preset.targetRIR, repRangeMin: preset.repRangeMin, repRangeMax: preset.repRangeMax });
+      STATE.settings = await DB.getSettings();
+      renderSettings(container);
+    });
+  });
+
+  const addCustomExerciseBtn = container.querySelector('#addCustomExerciseBtn');
+  if (addCustomExerciseBtn) {
+    addCustomExerciseBtn.addEventListener('click', async () => {
+      const nameInput = container.querySelector('#newExName');
+      const name = nameInput.value.trim();
+      if (!name) { alert('Give the exercise a name.'); return; }
+      const muscleGroup = container.querySelector('#newExMuscle').value;
+      const equipment = container.querySelector('#newExEquipment').value;
+      const compound = container.querySelector('#newExCompound').checked;
+      const id = 'custom-' + muscleGroup + '-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+      const exercise = { id, name, muscleGroup, equipment, compound };
+      await DB.addCustomExercise(exercise);
+      STATE.customExercises = await DB.getAllCustomExercises();
+      renderSettings(container);
+    });
+  }
+
+  container.querySelectorAll('[data-role="delete-custom-exercise"]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      if (!confirm('Delete this custom exercise? Past logged sets that used it are kept, but you will not be able to pick it again.')) return;
+      await DB.deleteCustomExercise(btn.dataset.id);
+      STATE.customExercises = await DB.getAllCustomExercises();
+      renderSettings(container);
+    });
+  });
+
   container.querySelector('#saveSettingsBtn').addEventListener('click', async () => {
     const units = container.querySelector('#setUnits').value;
     const targetRIR = parseFloat(container.querySelector('#setTargetRIR').value) || DEFAULT_TARGET_RIR;
@@ -915,6 +1117,7 @@ function renderSettings(container) {
       STATE.settings = await DB.getSettings();
       STATE.meso = await DB.getActiveMesocycle();
       STATE.sessions = await DB.getAllSessions();
+      STATE.customExercises = await DB.getAllCustomExercises();
       STATE.draft = null;
       alert('Backup imported.');
       goTo('dashboard');

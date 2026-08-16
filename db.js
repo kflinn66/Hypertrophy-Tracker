@@ -2,13 +2,14 @@
 // fully offline with nothing to fetch from a CDN.
 //
 // Stores:
-//   sessions     - one record per workout day you log
-//   mesocycles   - training blocks (start date, length, split, current week, deload flag)
-//   settings     - single record with your app-wide preferences
-//   customPlans  - any plans you build/edit yourself (premade plans live in js/plans.js)
+//   sessions         - one record per workout day you log
+//   mesocycles       - training blocks (start date, length, split, current week, deload flag)
+//   settings         - single record with your app-wide preferences
+//   customPlans      - any plans you build/edit yourself (premade plans live in js/plans.js)
+//   customExercises  - exercises you've added yourself, layered on top of js/exercises.js
 
 const DB_NAME = 'hypertrackDB';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 function openDB() {
   return new Promise((resolve, reject) => {
@@ -30,6 +31,9 @@ function openDB() {
       }
       if (!db.objectStoreNames.contains('customPlans')) {
         db.createObjectStore('customPlans', { keyPath: 'id', autoIncrement: true });
+      }
+      if (!db.objectStoreNames.contains('customExercises')) {
+        db.createObjectStore('customExercises', { keyPath: 'id', autoIncrement: true });
       }
     };
 
@@ -120,7 +124,8 @@ const DB = {
       units: 'lbs',
       restTimerSeconds: 120,
       onboarded: false,
-      theme: 'dark'
+      theme: 'dark',
+      goal: 'hypertrophy'
     };
   },
   async saveSettings(data) {
@@ -140,21 +145,37 @@ const DB = {
     return promisify(tx(db, 'customPlans', 'readonly').getAll());
   },
 
+  // ---------------- custom exercises ----------------
+  async addCustomExercise(exercise) {
+    const db = await openDB();
+    return promisify(tx(db, 'customExercises', 'readwrite').add(exercise));
+  },
+  async getAllCustomExercises() {
+    const db = await openDB();
+    return promisify(tx(db, 'customExercises', 'readonly').getAll());
+  },
+  async deleteCustomExercise(id) {
+    const db = await openDB();
+    return promisify(tx(db, 'customExercises', 'readwrite').delete(id));
+  },
+
   // ---------------- backup / restore ----------------
   async exportAll() {
-    const [sessions, mesocycles, settings, customPlans] = await Promise.all([
+    const [sessions, mesocycles, settings, customPlans, customExercises] = await Promise.all([
       this.getAllSessions(),
       this.getAllMesocycles(),
       this.getSettings(),
-      this.getAllCustomPlans()
+      this.getAllCustomPlans(),
+      this.getAllCustomExercises()
     ]);
     return {
       exportedAt: new Date().toISOString(),
-      appVersion: 1,
+      appVersion: 2,
       sessions,
       mesocycles,
       settings,
-      customPlans
+      customPlans,
+      customExercises
     };
   },
   async importAll(data) {
@@ -162,12 +183,13 @@ const DB = {
     const db = await openDB();
 
     const clearStore = (name) => promisify(tx(db, name, 'readwrite').clear());
-    await Promise.all(['sessions', 'mesocycles', 'customPlans'].map(clearStore));
+    await Promise.all(['sessions', 'mesocycles', 'customPlans', 'customExercises'].map(clearStore));
 
     const put = (name, record) => promisify(tx(db, name, 'readwrite').put(record));
     for (const s of data.sessions) await put('sessions', s);
     for (const m of data.mesocycles || []) await put('mesocycles', m);
     for (const p of data.customPlans || []) await put('customPlans', p);
+    for (const c of data.customExercises || []) await put('customExercises', c);
     if (data.settings) await put('settings', Object.assign({}, data.settings, { id: 'main' }));
   }
 };

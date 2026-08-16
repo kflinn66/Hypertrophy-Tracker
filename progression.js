@@ -8,6 +8,13 @@ const DEFAULT_REP_RANGE = { min: 8, max: 12 };
 const WEIGHT_STEP_LBS = 5;
 const WEIGHT_STEP_KG = 2.5;
 
+// Training-goal presets. Picking a goal sets the default target RIR and rep
+// range used across onboarding, Settings, and progression suggestions.
+const GOAL_PRESETS = {
+  hypertrophy: { label: 'Growth (Hypertrophy)', targetRIR: DEFAULT_TARGET_RIR, repRangeMin: DEFAULT_REP_RANGE.min, repRangeMax: DEFAULT_REP_RANGE.max },
+  strength:    { label: 'Strength',             targetRIR: 2,                 repRangeMin: 3,                      repRangeMax: 6 }
+};
+
 function average(nums) {
   const valid = nums.filter((n) => typeof n === 'number' && !isNaN(n));
   if (valid.length === 0) return null;
@@ -95,5 +102,5 @@ function getProgressionSuggestion(exerciseId, sessions, options) {
 }
 
 if (typeof module !== 'undefined') {
-  module.exports = { getProgressionSuggestion, lastLoggedSetsForExercise, DEFAULT_TARGET_RIR, DEFAULT_REP_RANGE };
+  module.exports = { getProgressionSuggestion, lastLoggedSetsForExercise, DEFAULT_TARGET_RIR, DEFAULT_REP_RANGE, GOAL_PRESETS };
 }
