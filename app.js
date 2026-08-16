@@ -478,9 +478,9 @@ function renderDashboard(container) {
 
     body = `
       <div class="stat-row">
-        <div class="stat-tile"><div class="val">${totalCompleted}</div><div class="lbl">Workouts</div></div>
-        <div class="stat-tile"><div class="val">${weekLabel}</div><div class="lbl">${escapeHtml(plan.splitName)}</div></div>
-        <div class="stat-tile"><div class="val ${overallOk ? 'status-mav' : 'status-high'}">${overallOk ? '✓' : '!'}</div><div class="lbl">${overallOk ? 'On Track' : 'Check Volume'}</div></div>
+        <div class="stat-tile clickable" data-role="stat-workouts" role="button" tabindex="0" aria-label="View session history"><div class="val">${totalCompleted}</div><div class="lbl">Workouts</div></div>
+        <div class="stat-tile clickable" data-role="stat-week" role="button" tabindex="0" aria-label="View plan details"><div class="val">${weekLabel}</div><div class="lbl">${escapeHtml(plan.splitName)}</div></div>
+        <div class="stat-tile clickable" data-role="stat-volume" role="button" tabindex="0" aria-label="Jump to this week's volume"><div class="val ${overallOk ? 'status-mav' : 'status-high'}">${overallOk ? '✓' : '!'}</div><div class="lbl">${overallOk ? 'On Track' : 'Check Volume'}</div></div>
       </div>
 
       <div class="card">
@@ -512,7 +512,7 @@ function renderDashboard(container) {
 
   container.innerHTML = appShell(body, 'dashboard', 'HyperTrack', STATE.meso.plan.splitName);
   const goLogBtn = container.querySelector('[data-role="go-log"]');
-  if (goLogBtn) goLogBtn.addEventListener('click', () => goTo('log'));
+  if (goLogBtn) goLogBtn.addEventListener('click', () => goTo('log')); const bindActivatable = (el, handler) => { if (!el) return; el.addEventListener('click', handler); el.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handler(); } }); }; bindActivatable(container.querySelector('[data-role="stat-workouts"]'), () => goTo('progress')); bindActivatable(container.querySelector('[data-role="stat-week"]'), () => goTo('settings')); bindActivatable(container.querySelector('[data-role="stat-volume"]'), () => { const heading = Array.from(container.querySelectorAll('.card h2')).find((h) => h.textContent.trim() === "This Week's Volume"); if (heading) heading.closest('.card').scrollIntoView({ behavior: 'smooth', block: 'start' }); });
 }
 
 // ---------------------------------------------------------------------------
