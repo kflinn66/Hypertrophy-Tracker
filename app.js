@@ -271,7 +271,7 @@ function drawOnboarding(container, opts) {
   const body = `
     <div class="card">
       <h2>${opts.isChange ? 'Change Your Plan' : 'Welcome'}</h2>
-      <p class="small muted">${opts.isChange ? 'This starts a fresh mesocycle. Your training history is kept.' : 'Pick a preset split or build your own training days, and we\'ll build your weekly volume targets automatically.'=</p>
+      <p class="small muted">${opts.isChange ? 'This starts a fresh mesocycle. Your training history is kept.' : 'Pick a preset split or build your own training days, and we\'ll build your weekly volume targets automatically.'}</p>
     </div>
     ${trainingStyleSection}
     ${splitSection}
