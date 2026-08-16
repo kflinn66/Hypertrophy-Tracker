@@ -119,7 +119,8 @@ const DB = {
       id: 'main',
       units: 'lbs',
       restTimerSeconds: 120,
-      onboarded: false
+      onboarded: false,
+      theme: 'dark'
     };
   },
   async saveSettings(data) {

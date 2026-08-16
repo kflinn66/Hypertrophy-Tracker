@@ -22,9 +22,15 @@ async function boot() {
   STATE.sessions = await DB.getAllSessions();
   TIMER.remaining = STATE.settings.restTimerSeconds || 120;
   TIMER.total = TIMER.remaining;
+  applyTheme(STATE.settings.theme || 'dark');
 
   window.addEventListener('hashchange', () => renderRoute());
   renderRoute();
+}
+
+function applyTheme(theme) {
+  const value = theme || 'dark';
+  document.documentElement.setAttribute('data-theme', value);
 }
 
 document.addEventListener('DOMContentLoaded', boot);
@@ -87,10 +93,6 @@ function escapeHtml(str) {
 }
 
 function exerciseById(id) { return EXERCISES.find((e) => e.id === id); }
-
-function volumeCellClass(status) {
-  return { under: 'cell-under', mev: 'cell-mev', mav: 'cell-mav', high: 'cell-high', over: 'cell-over' }[status] || '';
-}
 
 // ---------------------------------------------------------------------------
 // Mesocycle status / volume math
@@ -254,6 +256,16 @@ async function completeOnboarding() {
 // ---------------------------------------------------------------------------
 // Dashboard
 // ---------------------------------------------------------------------------
+function statusMeta(status) {
+  return {
+    under:   { label: 'Under MEV', fillClass: 'fill-under',  textClass: 'status-under' },
+    mev:     { label: 'Building',  fillClass: 'fill-mev',    textClass: 'status-mev' },
+    mav:     { label: 'On Track',  fillClass: 'fill-mav',    textClass: 'status-mav' },
+    high:    { label: 'High',      fillClass: 'fill-high',   textClass: 'status-high' },
+    over:    { label: 'Over MRV',  fillClass: 'fill-over',   textClass: 'status-over' }
+  }[status] || { label: '', fillClass: '', textClass: '' };
+}
+
 function renderDashboard(container) {
   const status = mesoStatus(STATE.meso, STATE.sessions);
   const plan = STATE.meso.plan;
@@ -267,62 +279,63 @@ function renderDashboard(container) {
         <a class="btn block" href="#/setup">Start Your Next Mesocycle</a>
       </div>`;
   } else {
-    const weekLabel = status.isDeload ? 'Deload Week' : `Week ${status.weekIndex + 1} of ${STATE.meso.trainingWeeks}`;
+    const weekLabel = status.isDeload ? 'Deload' : `Wk ${status.weekIndex + 1}/${STATE.meso.trainingWeeks}`;
     const todayDay = plan.days[status.dayIndex];
     const volumeTotals = computeWeeklyVolume(STATE.meso, status.currentWeekSessions, STATE.draft);
+    const totalCompleted = STATE.sessions.filter((s) => s.completed).length;
 
-    const rows = MUSCLE_GROUP_ORDER.filter((m) => plan.weeklyTargets[m] !== undefined).map((m) => {
+    const muscleKeys = MUSCLE_GROUP_ORDER.filter((m) => plan.weeklyTargets[m] !== undefined);
+    const statuses = muscleKeys.map((m) => classifyVolume(m, volumeTotals[m] || 0));
+    const onTrackCount = statuses.filter((s) => s === 'mav').length;
+    const overCount = statuses.filter((s) => s === 'over').length;
+    const overallOk = overCount === 0 && onTrackCount >= Math.ceil(muscleKeys.length / 2);
+
+    const meterRows = muscleKeys.map((m) => {
       const lm = VOLUME_LANDMARKS[m];
       const logged = volumeTotals[m] || 0;
-      const target = plan.weeklyTargets[m] || 0;
-      const cls = volumeCellClass(classifyVolume(m, logged));
-      return `<tr>
-        <td>${escapeHtml(lm.label)}</td>
-        <td class="num ${cls}">${logged}</td>
-        <td class="num muted">${target}</td>
-        <td class="num muted small">${lm.mev}/${lm.mavLow}-${lm.mavHigh}/${lm.mrv}</td>
-      </tr>`;
+      const cls = classifyVolume(m, logged);
+      const meta = statusMeta(cls);
+      const pct = Math.min(100, Math.round((logged / lm.mrv) * 100));
+      return `<div class="meter-row">
+        <span class="name">${escapeHtml(lm.label)}</span>
+        <div class="meter-track"><div class="meter-fill ${meta.fillClass}" style="width:${pct}%"></div></div>
+        <span class="meter-status ${meta.textClass}">${meta.label}</span>
+      </div>`;
     }).join('');
 
     const recent = STATE.sessions.filter((s) => s.completed).sort((a, b) => (a.date < b.date ? 1 : -1)).slice(0, 3);
     const recentHtml = recent.length
-      ? recent.map((s) => `<div class="row between small" style="padding:4px 0;border-bottom:1px solid var(--border)">
-          <span>${escapeHtml(s.dayLabel)}${s.isDeload ? ' <span class="badge deload">deload</span>' : ''}</span>
-          <span class="muted">${new Date(s.date).toLocaleDateString()}</span>
+      ? recent.map((s) => `<div class="list-row">
+          <span class="primary">${escapeHtml(s.dayLabel)}${s.isDeload ? ' <span class="badge deload">deload</span>' : ''}</span>
+          <span class="trailing">${new Date(s.date).toLocaleDateString()}</span>
         </div>`).join('')
-      : `<p class="muted small">No workouts logged yet.</p>`;
+      : `<p class="empty-state">No workouts logged yet.</p>`;
 
     body = `
-      <div class="card">
-        <div class="row between">
-          <div>
-            <h2 style="margin-bottom:2px">${escapeHtml(plan.splitName)}</h2>
-            <div class="small muted">${STATE.meso.daysPerWeek} days/week</div>
-          </div>
-          <span class="badge ${status.isDeload ? 'deload' : ''}">${weekLabel}</span>
-        </div>
+      <div class="stat-row">
+        <div class="stat-tile"><div class="val">${totalCompleted}</div><div class="lbl">Workouts</div></div>
+        <div class="stat-tile"><div class="val">${weekLabel}</div><div class="lbl">${escapeHtml(plan.splitName)}</div></div>
+        <div class="stat-tile"><div class="val ${overallOk ? 'status-mav' : 'status-high'}">${overallOk ? '✓' : '!'}</div><div class="lbl">${overallOk ? 'On Track' : 'Check Volume'}</div></div>
       </div>
 
       <div class="card">
         <h2>Today</h2>
-        <p style="margin:0 0 8px"><strong>${escapeHtml(todayDay.dayLabel)}</strong> &mdash; ${todayDay.muscles.map((m) => VOLUME_LANDMARKS[m].label).join(', ')}</p>
+        <div class="today-title">${escapeHtml(todayDay.dayLabel)}</div>
+        <div class="today-sub">${todayDay.muscles.map((m) => VOLUME_LANDMARKS[m].label).join(' · ')}</div>
         <button class="block" data-role="go-log">${STATE.draft && !STATE.draft.completed ? 'Resume Workout' : 'Start Workout'}</button>
       </div>
 
       <div class="card">
         <h2>This Week's Volume</h2>
-        <table class="grid">
-          <thead><tr><th>Muscle</th><th class="num">Sets</th><th class="num">Target</th><th class="num">MEV/MAV/MRV</th></tr></thead>
-          <tbody>${rows}</tbody>
-        </table>
+        ${meterRows}
         <div class="legend">
-          <div><span class="swatch" style="background:var(--under-bg)"></span>Under MEV</div>
-          <div><span class="swatch" style="background:var(--mev-bg)"></span>At MEV</div>
-          <div><span class="swatch" style="background:var(--mav-bg)"></span>MAV range</div>
-          <div><span class="swatch" style="background:var(--high-bg)"></span>Above MAV</div>
-          <div><span class="swatch" style="background:var(--over-bg)"></span>Over MRV</div>
+          <div><span class="swatch" style="background:var(--muted)"></span>Under MEV</div>
+          <div><span class="swatch" style="background:var(--warning)"></span>Building</div>
+          <div><span class="swatch" style="background:var(--good)"></span>On Track</div>
+          <div><span class="swatch" style="background:var(--serious)"></span>High</div>
+          <div><span class="swatch" style="background:var(--critical)"></span>Over MRV</div>
         </div>
-        ${status.isDeload ? '<p class="small muted" style="margin-top:8px">Deload week: lower numbers here are expected &mdash; targets are intentionally reduced.</p>' : ''}
+        ${status.isDeload ? '<p class="small muted" style="margin-top:10px">Deload week: lower numbers here are expected &mdash; targets are intentionally reduced.</p>' : ''}
       </div>
 
       <div class="card">
@@ -332,7 +345,7 @@ function renderDashboard(container) {
     `;
   }
 
-  container.innerHTML = appShell(body, 'dashboard', 'Hypertrophy Tracker', STATE.meso.plan.splitName);
+  container.innerHTML = appShell(body, 'dashboard', 'HyperTrack', STATE.meso.plan.splitName);
   const goLogBtn = container.querySelector('[data-role="go-log"]');
   if (goLogBtn) goLogBtn.addEventListener('click', () => goTo('log'));
 }
@@ -410,34 +423,45 @@ function drawLog(container, draft, status) {
   const exerciseBlocks = draft.entries.map((entry, ei) => {
     const ex = exerciseById(entry.exerciseId);
     const suggestion = getProgressionSuggestion(entry.exerciseId, priorSessions, opts);
-    const setsRows = entry.sets.map((set, si) => `
-      <tr>
-        <td class="num muted">${si + 1}</td>
-        <td><input class="cell-input" inputmode="decimal" placeholder="${STATE.settings.units}" data-entry="${ei}" data-set="${si}" data-field="weight" value="${escapeHtml(set.weight)}"></td>
-        <td><input class="cell-input" inputmode="numeric" placeholder="reps" data-entry="${ei}" data-set="${si}" data-field="reps" value="${escapeHtml(set.reps)}"></td>
-        <td><input class="cell-input" inputmode="numeric" placeholder="RIR" data-entry="${ei}" data-set="${si}" data-field="rir" value="${escapeHtml(set.rir)}"></td>
-        <td><input class="cell-input" placeholder="tempo" data-entry="${ei}" data-set="${si}" data-field="tempo" value="${escapeHtml(set.tempo)}"></td>
-        <td><input class="cell-input" placeholder="notes" data-entry="${ei}" data-set="${si}" data-field="notes" value="${escapeHtml(set.notes)}"></td>
-        <td class="set-row-actions"><button type="button" class="ghost small" data-role="remove-set" data-entry="${ei}" data-set="${si}">&times;</button></td>
-      </tr>
-    `).join('');
+    const setsRows = entry.sets.map((set, si) => {
+      const done = set.reps !== '' && set.reps !== null && set.reps !== undefined;
+      return `
+      <div class="set-row">
+        <div class="set-num">${si + 1}</div>
+        <div class="set-field">
+          <span class="field-label">${escapeHtml(STATE.settings.units)}</span>
+          <input class="cell-input" inputmode="decimal" placeholder="&mdash;" data-entry="${ei}" data-set="${si}" data-field="weight" value="${escapeHtml(set.weight)}">
+        </div>
+        <div class="set-field">
+          <span class="field-label">Reps</span>
+          <input class="cell-input" inputmode="numeric" placeholder="&mdash;" data-entry="${ei}" data-set="${si}" data-field="reps" value="${escapeHtml(set.reps)}">
+        </div>
+        <div class="set-field">
+          <span class="field-label">RIR</span>
+          <input class="cell-input" inputmode="numeric" placeholder="&mdash;" data-entry="${ei}" data-set="${si}" data-field="rir" value="${escapeHtml(set.rir)}">
+        </div>
+        <div class="set-check ${done ? 'done' : ''}">&#10003;</div>
+        <div class="set-row-actions"><button type="button" class="ghost small" data-role="remove-set" data-entry="${ei}" data-set="${si}">&times;</button></div>
+      </div>
+      <div class="set-extra-row">
+        <input class="cell-input secondary-input" placeholder="tempo" data-entry="${ei}" data-set="${si}" data-field="tempo" value="${escapeHtml(set.tempo)}">
+        <input class="cell-input secondary-input" placeholder="notes" data-entry="${ei}" data-set="${si}" data-field="notes" value="${escapeHtml(set.notes)}">
+      </div>`;
+    }).join('');
 
     return `
-      <div class="exercise-block">
-        <div class="ex-header">
+      <div class="ex-card">
+        <div class="ex-head">
           <div class="row between">
-            <strong>${escapeHtml(ex ? ex.name : 'Unknown exercise')}</strong>
+            <span class="name">${escapeHtml(ex ? ex.name : 'Unknown exercise')}</span>
             <button type="button" class="ghost small" data-role="remove-exercise" data-entry="${ei}">Remove</button>
           </div>
           <select data-role="swap-exercise" data-entry="${ei}">${exerciseOptionsHtml(entry.muscleGroup, entry.exerciseId)}</select>
           <div class="ex-suggestion">${escapeHtml(suggestion.note || '')}</div>
         </div>
-        <div class="ex-body">
-          <table class="grid">
-            <thead><tr><th>#</th><th>Wt</th><th>Reps</th><th>RIR</th><th>Tempo</th><th>Notes</th><th></th></tr></thead>
-            <tbody>${setsRows}</tbody>
-          </table>
-          <button type="button" class="secondary small" style="margin-top:8px" data-role="add-set" data-entry="${ei}">+ Add Set</button>
+        ${setsRows}
+        <div style="padding:10px 14px 14px">
+          <button type="button" class="secondary small" data-role="add-set" data-entry="${ei}">+ Add Set</button>
         </div>
       </div>
     `;
@@ -455,11 +479,11 @@ function drawLog(container, draft, status) {
       <span class="small muted">${new Date(draft.date).toLocaleDateString()}</span>
     </div>
 
-    <div class="timer-widget">
-      <span>Rest: <span class="time" id="timerDisplay">${formatTime(TIMER.remaining)}</span></span>
+    <div class="rest-pill">
+      <span>⏱ Rest &nbsp;<span class="time" id="timerDisplay">${formatTime(TIMER.remaining)}</span></span>
       <span class="row">
-        <button type="button" class="secondary small" data-role="timer-toggle">${TIMER.running ? 'Pause' : 'Start'}</button>
-        <button type="button" class="ghost small" data-role="timer-reset">Reset</button>
+        <button type="button" data-role="timer-toggle">${TIMER.running ? 'Pause' : 'Start'}</button>
+        <button type="button" data-role="timer-reset">Reset</button>
       </span>
     </div>
 
@@ -494,6 +518,11 @@ function wireLogEvents(container, draft) {
       const field = input.dataset.field;
       draft.entries[ei].sets[si][field] = input.value;
       scheduleSave();
+      if (field === 'reps') {
+        const row = input.closest('.set-row');
+        const check = row && row.querySelector('.set-check');
+        if (check) check.classList.toggle('done', input.value !== '');
+      }
     });
   });
 
@@ -662,12 +691,16 @@ function drawLibrary(container, filters) {
     EQUIPMENT_TYPES.map((eq) => `<option value="${eq}" ${filters.equipment === eq ? 'selected' : ''}>${eq[0].toUpperCase() + eq.slice(1)}</option>`)
   ).join('');
 
-  const rows = list.map((e) => `<tr>
-    <td>${escapeHtml(e.name)}</td>
-    <td>${escapeHtml(VOLUME_LANDMARKS[e.muscleGroup].label)}</td>
-    <td>${escapeHtml(e.equipment)}</td>
-    <td>${e.compound ? 'Compound' : 'Isolation'}</td>
-  </tr>`).join('');
+  const rows = list.map((e) => `<div class="list-row">
+    <div>
+      <div class="primary">${escapeHtml(e.name)}</div>
+      <div class="secondary">
+        <span class="tag">${escapeHtml(VOLUME_LANDMARKS[e.muscleGroup].label)}</span>
+        <span class="tag">${escapeHtml(e.equipment)}</span>
+      </div>
+    </div>
+    <span class="trailing">${e.compound ? 'Compound' : 'Isolation'}</span>
+  </div>`).join('');
 
   const body = `
     <div class="card">
@@ -678,10 +711,7 @@ function drawLibrary(container, filters) {
       </div>
     </div>
     <div class="card">
-      <table class="grid">
-        <thead><tr><th>Exercise</th><th>Muscle</th><th>Equipment</th><th>Type</th></tr></thead>
-        <tbody>${rows || '<tr><td colspan="4" class="empty-state">No exercises match.</td></tr>'}</tbody>
-      </table>
+      ${rows || '<p class="empty-state">No exercises match.</p>'}
       <p class="small muted" style="margin-top:8px">${list.length} exercises</p>
     </div>
   `;
@@ -711,12 +741,13 @@ function drawProgress(container, selectedExerciseId) {
 
   const historyRows = completed.slice(0, 25).map((s) => {
     const setCount = (s.entries || []).reduce((sum, e) => sum + loggedSetCount(e.sets), 0);
-    return `<tr>
-      <td>${new Date(s.date).toLocaleDateString()}</td>
-      <td>${escapeHtml(s.dayLabel)}${s.isDeload ? ' <span class="badge deload">deload</span>' : ''}</td>
-      <td class="num">${(s.entries || []).length}</td>
-      <td class="num">${setCount}</td>
-    </tr>`;
+    return `<div class="list-row">
+      <div>
+        <div class="primary">${escapeHtml(s.dayLabel)}${s.isDeload ? ' <span class="badge deload">deload</span>' : ''}</div>
+        <div class="secondary">${new Date(s.date).toLocaleDateString()} &middot; ${(s.entries || []).length} exercises</div>
+      </div>
+      <span class="trailing num">${setCount} sets</span>
+    </div>`;
   }).join('');
 
   const loggedExerciseIds = Array.from(new Set(
@@ -740,21 +771,19 @@ function drawProgress(container, selectedExerciseId) {
       const topSet = workingSets.reduce((best, cur) => (parseFloat(cur.weight) || 0) > (parseFloat(best.weight) || 0) ? cur : best, workingSets[0]);
       points.push({ date: s.date, weight: topSet.weight, reps: topSet.reps, rir: topSet.rir });
     });
-    const rows = points.slice(0, 12).map((p) => `<tr>
-      <td>${new Date(p.date).toLocaleDateString()}</td>
-      <td class="num">${escapeHtml(p.weight)}</td>
-      <td class="num">${escapeHtml(p.reps)}</td>
-      <td class="num">${escapeHtml(p.rir)}</td>
-    </tr>`).join('');
+    const rows = points.slice(0, 12).map((p) => `<div class="list-row">
+      <span class="secondary">${new Date(p.date).toLocaleDateString()}</span>
+      <span class="trailing num">${escapeHtml(p.weight)}${escapeHtml(STATE.settings.units)} &times; ${escapeHtml(p.reps)} @ RIR ${escapeHtml(p.rir)}</span>
+    </div>`).join('');
     trendHtml = points.length
-      ? `<table class="grid"><thead><tr><th>Date</th><th class="num">Top Wt</th><th class="num">Reps</th><th class="num">RIR</th></tr></thead><tbody>${rows}</tbody></table>`
-      : '<p class="muted small">No logged sets yet for this exercise.</p>';
+      ? rows
+      : '<p class="empty-state">No logged sets yet for this exercise.</p>';
   }
 
   const body = `
     <div class="card">
       <h2>Session History</h2>
-      ${historyRows ? `<table class="grid"><thead><tr><th>Date</th><th>Day</th><th class="num">Exercises</th><th class="num">Sets</th></tr></thead><tbody>${historyRows}</tbody></table>` : '<p class="empty-state">No completed workouts yet.</p>'}
+      ${historyRows || '<p class="empty-state">No completed workouts yet.</p>'}
     </div>
     <div class="card">
       <h2>Exercise Trend</h2>
@@ -773,7 +802,17 @@ function drawProgress(container, selectedExerciseId) {
 // ---------------------------------------------------------------------------
 function renderSettings(container) {
   const s = STATE.settings;
+  const currentTheme = s.theme || 'dark';
   const body = `
+    <div class="card">
+      <h2>Appearance</h2>
+      <div class="theme-toggle" id="themeToggle" role="group" aria-label="Theme">
+        <button type="button" class="theme-toggle-btn ${currentTheme === 'dark' ? 'active' : ''}" data-theme-value="dark">Dark</button>
+        <button type="button" class="theme-toggle-btn ${currentTheme === 'light' ? 'active' : ''}" data-theme-value="light">Light</button>
+        <button type="button" class="theme-toggle-btn ${currentTheme === 'system' ? 'active' : ''}" data-theme-value="system">System</button>
+      </div>
+    </div>
+
     <div class="card">
       <h2>Plan</h2>
       <p class="small">${escapeHtml(STATE.meso.plan.splitName)} &middot; ${STATE.meso.daysPerWeek} days/week &middot; ${STATE.meso.trainingWeeks}+1 week meso</p>
@@ -827,6 +866,16 @@ function renderSettings(container) {
   `;
 
   container.innerHTML = appShell(body, 'settings', 'Settings', '');
+
+  container.querySelectorAll('#themeToggle .theme-toggle-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const value = btn.dataset.themeValue;
+      container.querySelectorAll('#themeToggle .theme-toggle-btn').forEach(b => b.classList.toggle('active', b === btn));
+      applyTheme(value);
+      await DB.saveSettings({ theme: value });
+      STATE.settings = await DB.getSettings();
+    });
+  });
 
   container.querySelector('#saveSettingsBtn').addEventListener('click', async () => {
     const units = container.querySelector('#setUnits').value;
