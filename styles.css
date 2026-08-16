@@ -196,7 +196,7 @@ html, body {
   text-align: left;
 }
 .stat-tile .val { font-size: 20px; font-weight: 700; line-height: 1.1; }
-.stat-tile .lbl { font-size: 10px; color: var(--muted); margin-top: 3px; text-transform: uppercase; letter-spacing: .03em; }
+.stat-tile .lbl { font-size: 10px; color: var(--muted); margin-top: 3px; text-transform: uppercase; letter-spacing: .03em; } .stat-tile.clickable { cursor: pointer; transition: background .15s ease, transform .1s ease; } .stat-tile.clickable:hover { background: var(--surface-raised); } .stat-tile.clickable:active { transform: scale(0.97); } .stat-tile.clickable:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* ---------------- Today / hero card ---------------- */
 .today-title { font-size: 19px; font-weight: 700; margin-bottom: 2px; letter-spacing: -0.01em; }
