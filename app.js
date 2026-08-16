@@ -271,7 +271,7 @@ function drawOnboarding(container, opts) {
   const body = `
     <div class="card">
       <h2>${opts.isChange ? 'Change Your Plan' : 'Welcome'}</h2>
-      <p class="small muted">${opts.isChange ? 'This starts a fresh mesocycle. Your training history is kept.' : 'Pick a preset split or build your own training days, and we\'ll build your weekly volume targets automatically.'}</p>
+      <p class="small muted">${opts.isChange ? 'This starts a fresh mesocycle. Your training history is kept.' : 'Pick a preset split or build your own training days, and we\'ll build your weekly volume targets automatically.'=</p>
     </div>
     ${trainingStyleSection}
     ${splitSection}
@@ -536,12 +536,11 @@ async function ensureDraft() {
   if (status.isComplete) return null;
 
   const day = STATE.meso.plan.days[status.dayIndex];
-  const deloadMultiplier = status.isDeload ? 0.5 : 1;
   const entries = day.exercises.map((ex) => ({
     exerciseId: ex.exerciseId,
     muscleGroup: ex.muscleGroup,
     targetSets: ex.targetSets,
-    sets: Array.from({ length: Math.max(1, Math.round(ex.targetSets * deloadMultiplier)) }, () => ({ weight: '', reps: '', rir: '', tempo: '', notes: '' }))
+    sets: Array.from({ length: 2 }, () => ({ weight: '', reps: '', rir: '', tempo: '', notes: '' }))
   }));
 
   const session = {
