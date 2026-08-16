@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<title>Hypertrophy Tracker</title>
+<meta name="description" content="Personal workout tracker with volume landmarks, RIR autoregulation, and auto-progression.">
+<meta name="theme-color" content="#217346">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="HyperTrack">
+<link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+<div id="app">
+  <div class="view"><p class="muted">Loading…</p></div>
+</div>
+
+<button id="installBtn" class="btn" style="display:none;position:fixed;right:12px;bottom:76px;z-index:30;box-shadow:0 2px 8px rgba(0,0,0,0.25)">Install App</button>
+
+<script>
+  let deferredInstallPrompt = null;
+  window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();
+    deferredInstallPrompt = e;
+    const btn = document.getElementById('installBtn');
+    btn.style.display = 'block';
+    btn.addEventListener('click', async () => {
+      btn.style.display = 'none';
+      if (deferredInstallPrompt) {
+        deferredInstallPrompt.prompt();
+        await deferredInstallPrompt.userChoice;
+        deferredInstallPrompt = null;
+      }
+    });
+  });
+  window.addEventListener('appinstalled', () => {
+    const btn = document.getElementById('installBtn');
+    if (btn) btn.style.display = 'none';
+  });
+</script>
+
+<script src="js/volume-landmarks.js"></script>
+<script src="js/exercises.js"></script>
+<script src="js/plans.js"></script>
+<script src="js/progression.js"></script>
+<script src="js/db.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
