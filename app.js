@@ -46,15 +46,21 @@ async function renderRoute() {
     renderOnboarding(container, { isChange: false });
     return;
   }
-  const hash = (location.hash.replace('#/', '') || 'dashboard').split('?')[0];
-  switch (hash) {
+  const hashPath = (location.hash.replace('#/', '') || 'dashboard').split('?')[0];
+  const segments = hashPath.split('/');
+  switch (segments[0]) {
     case 'dashboard': renderDashboard(container); break;
     case 'log': await renderLog(container); break;
     case 'progress': renderProgress(container); break;
     case 'settings': renderSettings(container); break;
     case 'setup': renderOnboarding(container, { isChange: true }); break;
+    case 'session': await renderSessionDetail(container, segments[1]); break;
     default: renderDashboard(container);
   }
+  // Hash-based navigation swaps the whole view but a real page nav would
+  // start at the top -- match that so landing on a new screen never leaves
+  // you scrolled to wherever the previous screen happened to be.
+  window.scrollTo(0, 0);
 }
 
 function goTo(route) { location.hash = '#/' + route; }
@@ -122,6 +128,108 @@ function mesoStatus(meso, sessions) {
 
 function loggedSetCount(sets) {
   return (sets || []).filter((s) => s.reps !== '' && s.reps !== null && s.reps !== undefined && !isNaN(parseFloat(s.reps))).length;
+}
+
+// Compact summary of a completed session used anywhere it's listed as a row:
+// dashboard "Recent Sessions", Progress "Session History", and the detail view header.
+function sessionSummary(session) {
+  const entries = session.entries || [];
+  const totalSets = entries.reduce((sum, e) => sum + loggedSetCount(e.sets), 0);
+  const totalVolume = entries.reduce((sum, e) => sum + (e.sets || []).reduce((s, set) => {
+    const w = parseFloat(set.weight), r = parseFloat(set.reps);
+    return s + (isFinite(w) && isFinite(r) ? w * r : 0);
+  }, 0), 0);
+  const muscleLabels = Array.from(new Set(entries.map((e) => e.muscleGroup)))
+    .map((m) => (VOLUME_LANDMARKS[m] ? VOLUME_LANDMARKS[m].label : m));
+  let durationMin = null;
+  if (session.startedAt && session.completedAt) {
+    durationMin = Math.max(1, Math.round((new Date(session.completedAt) - new Date(session.startedAt)) / 60000));
+  }
+  return { totalSets, totalVolume: Math.round(totalVolume), muscleLabels, exerciseCount: entries.length, durationMin };
+}
+
+// Current consecutive-week training streak: counts backward from this week
+// as long as each week hit at least one completed session, for the little
+// momentum badge on the dashboard.
+function computeTrainingStreak(sessions) {
+  const completed = sessions.filter((s) => s.completed).map((s) => new Date(s.date));
+  if (completed.length === 0) return 0;
+  const weekKey = (d) => {
+    const t = new Date(d);
+    const day = (t.getDay() + 6) % 7; // Monday-start week
+    t.setDate(t.getDate() - day);
+    return t.toISOString().slice(0, 10);
+  };
+  const weeksWithWorkouts = new Set(completed.map(weekKey));
+  let streak = 0;
+  const cursor = new Date();
+  for (;;) {
+    if (weeksWithWorkouts.has(weekKey(cursor))) { streak++; cursor.setDate(cursor.getDate() - 7); }
+    else break;
+  }
+  return streak;
+}
+
+// True if this set's weight is the highest ever logged for this exercise as
+// of (and including) the given session -- a simple personal-best flag.
+function isPRSet(allSessions, session, exerciseId, weight) {
+  const w = parseFloat(weight);
+  if (!isFinite(w) || w <= 0) return false;
+  const priorBest = allSessions
+    .filter((s) => s.completed && new Date(s.date) < new Date(session.date))
+    .flatMap((s) => (s.entries || []).filter((e) => e.exerciseId === exerciseId))
+    .flatMap((e) => e.sets || [])
+    .reduce((best, set) => {
+      const sw = parseFloat(set.weight);
+      return isFinite(sw) && sw > best ? sw : best;
+    }, 0);
+  return w > priorBest;
+}
+
+async function deleteSessionFlow(id, afterRoute) {
+  if (!confirm('Delete this workout? This cannot be undone.')) return;
+  await DB.deleteSession(id);
+  STATE.sessions = await DB.getAllSessions();
+  if (STATE.draft && STATE.draft.id === id) STATE.draft = null;
+  goTo(afterRoute || 'progress');
+  renderRoute();
+}
+
+// Shared clickable row used on the Dashboard's Recent Sessions and the
+// Progress tab's Session History -- tap the row to open the full workout,
+// tap the trash icon to delete it without leaving the list.
+function sessionRowHtml(s) {
+  const sum = sessionSummary(s);
+  const muscleText = sum.muscleLabels.length
+    ? sum.muscleLabels.slice(0, 3).join(' · ') + (sum.muscleLabels.length > 3 ? ' +' + (sum.muscleLabels.length - 3) : '')
+    : `${sum.exerciseCount} exercises`;
+  return `<div class="list-row clickable" data-role="session-row" data-id="${s.id}" role="button" tabindex="0">
+      <div>
+        <div class="primary">${escapeHtml(s.dayLabel)}${s.isDeload ? ' <span class="badge deload">deload</span>' : ''}</div>
+        <div class="secondary">${escapeHtml(muscleText)} &middot; ${sum.totalSets} sets${sum.durationMin ? ' &middot; ' + sum.durationMin + ' min' : ''}</div>
+      </div>
+      <div class="row" style="gap:2px">
+        <div style="text-align:right">
+          <div class="trailing num">${sum.totalVolume ? sum.totalVolume.toLocaleString() + ' ' + escapeHtml(STATE.settings.units) : sum.totalSets + ' sets'}</div>
+          <div class="trailing" style="margin-top:2px">${new Date(s.date).toLocaleDateString()}</div>
+        </div>
+        <button type="button" class="icon-btn" data-role="delete-session" data-id="${s.id}" aria-label="Delete workout">&#128465;</button>
+      </div>
+    </div>`;
+}
+
+function wireSessionRows(container, afterRouteForDelete) {
+  container.querySelectorAll('[data-role="session-row"]').forEach((row) => {
+    const go = () => goTo('session/' + row.dataset.id);
+    row.addEventListener('click', (e) => { if (e.target.closest('[data-role="delete-session"]')) return; go(); });
+    row.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); } });
+  });
+  container.querySelectorAll('[data-role="delete-session"]').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      deleteSessionFlow(parseInt(btn.dataset.id, 10), afterRouteForDelete);
+    });
+  });
 }
 
 function computeWeeklyVolume(meso, currentWeekSessions, draft) {
@@ -470,13 +578,12 @@ function renderDashboard(container) {
 
     const recent = STATE.sessions.filter((s) => s.completed).sort((a, b) => (a.date < b.date ? 1 : -1)).slice(0, 3);
     const recentHtml = recent.length
-      ? recent.map((s) => `<div class="list-row">
-          <span class="primary">${escapeHtml(s.dayLabel)}${s.isDeload ? ' <span class="badge deload">deload</span>' : ''}</span>
-          <span class="trailing">${new Date(s.date).toLocaleDateString()}</span>
-        </div>`).join('')
+      ? recent.map(sessionRowHtml).join('')
       : `<p class="empty-state">No workouts logged yet.</p>`;
+    const streak = computeTrainingStreak(STATE.sessions);
 
     body = `
+      ${streak >= 2 ? `<div class="streak-strip">&#128293; ${streak}-week training streak &mdash; keep it going</div>` : ''}
       <div class="stat-row">
         <div class="stat-tile clickable" data-role="stat-workouts" role="button" tabindex="0" aria-label="View session history"><div class="val">${totalCompleted}</div><div class="lbl">Workouts</div></div>
         <div class="stat-tile clickable" data-role="stat-week" role="button" tabindex="0" aria-label="View plan details"><div class="val">${weekLabel}</div><div class="lbl">${escapeHtml(plan.splitName)}</div></div>
@@ -512,7 +619,15 @@ function renderDashboard(container) {
 
   container.innerHTML = appShell(body, 'dashboard', 'HyperTrack', STATE.meso.plan.splitName);
   const goLogBtn = container.querySelector('[data-role="go-log"]');
-  if (goLogBtn) goLogBtn.addEventListener('click', () => goTo('log')); const bindActivatable = (el, handler) => { if (!el) return; el.addEventListener('click', handler); el.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handler(); } }); }; bindActivatable(container.querySelector('[data-role="stat-workouts"]'), () => goTo('progress')); bindActivatable(container.querySelector('[data-role="stat-week"]'), () => goTo('settings')); bindActivatable(container.querySelector('[data-role="stat-volume"]'), () => { const heading = Array.from(container.querySelectorAll('.card h2')).find((h) => h.textContent.trim() === "This Week's Volume"); if (heading) heading.closest('.card').scrollIntoView({ behavior: 'smooth', block: 'start' }); });
+  if (goLogBtn) goLogBtn.addEventListener('click', () => goTo('log'));
+  const bindActivatable = (el, handler) => { if (!el) return; el.addEventListener('click', handler); el.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handler(); } }); };
+  bindActivatable(container.querySelector('[data-role="stat-workouts"]'), () => goTo('progress'));
+  bindActivatable(container.querySelector('[data-role="stat-week"]'), () => goTo('settings'));
+  bindActivatable(container.querySelector('[data-role="stat-volume"]'), () => {
+    const heading = Array.from(container.querySelectorAll('.card h2')).find((h) => h.textContent.trim() === "This Week's Volume");
+    if (heading) heading.closest('.card').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+  wireSessionRows(container, 'dashboard');
 }
 
 // ---------------------------------------------------------------------------
@@ -540,17 +655,20 @@ async function ensureDraft() {
     exerciseId: ex.exerciseId,
     muscleGroup: ex.muscleGroup,
     targetSets: ex.targetSets,
-    sets: Array.from({ length: 2 }, () => ({ weight: '', reps: '', rir: '', tempo: '', notes: '' }))
+    sets: Array.from({ length: 2 }, () => ({ weight: '', reps: '', rir: '', tempo: '', notes: '' })),
+    feedback: null
   }));
 
   const session = {
     date: new Date().toISOString(),
+    startedAt: new Date().toISOString(),
     mesoId: STATE.meso.id,
     weekIndex: status.weekIndex,
     dayIndex: status.dayIndex,
     dayLabel: day.dayLabel,
     isDeload: status.isDeload,
     entries,
+    muscleFeedback: {},
     completed: false
   };
   const id = await DB.addSession(session);
@@ -580,15 +698,152 @@ function exerciseOptionsHtml(muscleGroup, selectedId) {
   ).join('');
 }
 
+// Which sets currently have their tempo/notes row expanded. Keyed by
+// "entryIndex:setIndex". Reset per log session by wireLogEvents when a
+// different draft id is drawn, so it doesn't leak across workouts.
+let expandedNotes = new Set();
+let expandedNotesDraftId = null;
+
+function isEntryDone(entry) {
+  return entry.sets.length > 0 && entry.sets.every((s) => s.reps !== '' && s.reps !== null && s.reps !== undefined);
+}
+
+const PAIN_CHIPS = [
+  { value: 'none', label: 'None' },
+  { value: 'mild', label: 'Mild' },
+  { value: 'sharp', label: 'Sharp' }
+];
+const DIFFICULTY_CHIPS = [
+  { value: 'light', label: 'Too Light' },
+  { value: 'right', label: 'Just Right' },
+  { value: 'hard', label: 'Too Hard' }
+];
+const VOLUME_CHIPS = [
+  { value: 'little', label: 'Too Little' },
+  { value: 'right', label: 'Just Right' },
+  { value: 'much', label: 'Too Much' }
+];
+
+function chipRowHtml(role, entryIndex, groupName, chips, current, disabled) {
+  return `<div class="chip-row" data-role="${role}-row" ${entryIndex !== null ? `data-entry="${entryIndex}"` : ''} data-group="${escapeHtml(groupName)}">` +
+    chips.map((c) => `<button type="button" class="chip chip-${c.value} ${current === c.value ? 'active' : ''}" ${disabled ? 'disabled' : ''}
+      data-role="${role}" data-value="${c.value}" ${entryIndex !== null ? `data-entry="${entryIndex}"` : ''} data-group="${escapeHtml(groupName)}">${c.label}</button>`).join('') +
+    `</div>`;
+}
+
+// The post-exercise check-in (pain + felt-like chips), only shown once every
+// set on this exercise has reps logged. Factored out so it can be injected
+// live via refreshLogDynamicSections() the instant an exercise becomes done,
+// without a full-screen redraw that would steal focus mid-typing.
+function checkinSectionHtml(entry, ei) {
+  return `
+    <div class="exercise-checkin">
+      <div class="checkin-row">
+        <span class="checkin-label">Pain?</span>
+        ${chipRowHtml('pain-chip', ei, 'pain', PAIN_CHIPS, entry.feedback ? entry.feedback.pain : null, false)}
+      </div>
+      <div class="checkin-row">
+        <span class="checkin-label">Felt?</span>
+        ${chipRowHtml('diff-chip', ei, 'diff', DIFFICULTY_CHIPS, entry.feedback ? entry.feedback.difficulty : null, false)}
+      </div>
+    </div>`;
+}
+
+// Live, focus-safe update of the parts of the Log screen that depend on
+// "is this exercise/muscle group done yet" -- called on every reps keystroke.
+// Only touches the progress bar, per-card done state/checkmark, and the
+// check-in sections themselves; never re-renders the inputs the lifter is
+// actively typing into.
+function refreshLogDynamicSections(container, draft) {
+  const doneCount = draft.entries.filter(isEntryDone).length;
+  const fill = container.querySelector('.log-progress-fill');
+  const label = container.querySelector('.log-progress-label');
+  if (fill) fill.style.width = (draft.entries.length ? Math.round((doneCount / draft.entries.length) * 100) : 0) + '%';
+  if (label) label.textContent = `${doneCount}/${draft.entries.length} exercises logged`;
+
+  const cards = container.querySelectorAll('.ex-card');
+  draft.entries.forEach((entry, ei) => {
+    const card = cards[ei];
+    if (!card) return;
+    const done = isEntryDone(entry);
+    card.classList.toggle('ex-done', done);
+    const nameEl = card.querySelector('.ex-head .name');
+    if (nameEl) {
+      const hasCheck = !!nameEl.querySelector('.ex-done-check');
+      if (done && !hasCheck) nameEl.insertAdjacentHTML('afterbegin', '<span class="ex-done-check">&#10003;</span> ');
+      if (!done && hasCheck) { const c = nameEl.querySelector('.ex-done-check'); if (c) c.remove(); }
+    }
+    let checkin = card.querySelector('.exercise-checkin');
+    if (done && !checkin) {
+      card.insertAdjacentHTML('beforeend', checkinSectionHtml(entry, ei));
+      wireCheckinChips(card.querySelector('.exercise-checkin'), draft, container);
+    } else if (!done && checkin) {
+      checkin.remove();
+    }
+  });
+
+  const muscleOrder = [];
+  draft.entries.forEach((e) => { if (!muscleOrder.includes(e.muscleGroup)) muscleOrder.push(e.muscleGroup); });
+  const muscleRows = container.querySelectorAll('.muscle-checkin-row');
+  muscleOrder.forEach((m, mi) => {
+    const row = muscleRows[mi];
+    if (!row) return;
+    const entriesForMuscle = draft.entries.filter((e) => e.muscleGroup === m);
+    const allDone = entriesForMuscle.every(isEntryDone);
+    row.querySelectorAll('[data-role="muscle-chip"]').forEach((btn) => { btn.disabled = !allDone; });
+    const hint = row.querySelector('.muscle-checkin-label .muted');
+    if (allDone && hint) hint.remove();
+    else if (!allDone && !hint) {
+      const labelEl = row.querySelector('.muscle-checkin-label');
+      if (labelEl) labelEl.insertAdjacentHTML('beforeend', ' <span class="muted small">(finish all exercises first)</span>');
+    }
+  });
+}
+
+// Attaches pain/difficulty chip click handlers within a scope -- used both
+// for the initial render and for check-in sections injected live later.
+function wireCheckinChips(scopeEl, draft, container) {
+  scopeEl.querySelectorAll('[data-role="pain-chip"]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const ei = parseInt(btn.dataset.entry, 10);
+      const entry = draft.entries[ei];
+      entry.feedback = entry.feedback || { pain: null, difficulty: null };
+      entry.feedback.pain = btn.dataset.value;
+      scheduleSave();
+      drawLog(container, draft, mesoStatus(STATE.meso, STATE.sessions));
+    });
+  });
+  scopeEl.querySelectorAll('[data-role="diff-chip"]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const ei = parseInt(btn.dataset.entry, 10);
+      const entry = draft.entries[ei];
+      entry.feedback = entry.feedback || { pain: null, difficulty: null };
+      entry.feedback.difficulty = btn.dataset.value;
+      scheduleSave();
+      drawLog(container, draft, mesoStatus(STATE.meso, STATE.sessions));
+    });
+  });
+}
+
 function drawLog(container, draft, status) {
+  if (expandedNotesDraftId !== draft.id) { expandedNotes = new Set(); expandedNotesDraftId = draft.id; }
   const priorSessions = STATE.sessions.filter((s) => s.completed && s.id !== draft.id);
   const opts = { targetRIR: STATE.settings.targetRIR, repRange: { min: STATE.settings.repRangeMin, max: STATE.settings.repRangeMax }, units: STATE.settings.units };
+
+  const doneCount = draft.entries.filter(isEntryDone).length;
 
   const exerciseBlocks = draft.entries.map((entry, ei) => {
     const ex = exerciseById(entry.exerciseId);
     const suggestion = getProgressionSuggestion(entry.exerciseId, priorSessions, opts);
+    const entryDone = isEntryDone(entry);
+    const signalClass = suggestion.signal === 'up' ? 'status-mav' : suggestion.signal === 'down' ? 'status-serious' : 'status-warning';
+    const signalIcon = suggestion.signal === 'up' ? '&#9650;' : suggestion.signal === 'down' ? '&#9660;' : '&#9679;';
+
     const setsRows = entry.sets.map((set, si) => {
       const done = set.reps !== '' && set.reps !== null && set.reps !== undefined;
+      const key = `${ei}:${si}`;
+      const expanded = expandedNotes.has(key);
+      const hasExtra = (set.tempo && set.tempo !== '') || (set.notes && set.notes !== '');
       return `
       <div class="set-row">
         <div class="set-num">${si + 1}</div>
@@ -605,30 +860,52 @@ function drawLog(container, draft, status) {
           <input class="cell-input" inputmode="numeric" placeholder="&mdash;" data-entry="${ei}" data-set="${si}" data-field="rir" value="${escapeHtml(set.rir)}">
         </div>
         <div class="set-check ${done ? 'done' : ''}">&#10003;</div>
+        <button type="button" class="set-more-btn ${hasExtra ? 'has-content' : ''}" data-role="toggle-notes" data-entry="${ei}" data-set="${si}" aria-label="Tempo and notes">&#8942;</button>
         <div class="set-row-actions"><button type="button" class="ghost small" data-role="remove-set" data-entry="${ei}" data-set="${si}">&times;</button></div>
       </div>
-      <div class="set-extra-row">
+      ${expanded ? `<div class="set-extra-row">
         <input class="cell-input secondary-input" placeholder="tempo" data-entry="${ei}" data-set="${si}" data-field="tempo" value="${escapeHtml(set.tempo)}">
         <input class="cell-input secondary-input" placeholder="notes" data-entry="${ei}" data-set="${si}" data-field="notes" value="${escapeHtml(set.notes)}">
-      </div>`;
+      </div>` : ''}`;
     }).join('');
 
+    const checkinHtml = entryDone ? checkinSectionHtml(entry, ei) : '';
+
     return `
-      <div class="ex-card">
+      <div class="ex-card ${entryDone ? 'ex-done' : ''}">
         <div class="ex-head">
           <div class="row between">
-            <span class="name">${escapeHtml(ex ? ex.name : 'Unknown exercise')}</span>
-            <button type="button" class="ghost small" data-role="remove-exercise" data-entry="${ei}">Remove</button>
+            <span class="name">${entryDone ? '<span class="ex-done-check">&#10003;</span> ' : ''}${escapeHtml(ex ? ex.name : 'Unknown exercise')}</span>
+            <div class="reorder-btns">
+              <button type="button" class="ghost small" data-role="move-exercise" data-entry="${ei}" data-dir="-1" ${ei === 0 ? 'disabled' : ''} aria-label="Move up">&#9650;</button>
+              <button type="button" class="ghost small" data-role="move-exercise" data-entry="${ei}" data-dir="1" ${ei === draft.entries.length - 1 ? 'disabled' : ''} aria-label="Move down">&#9660;</button>
+              <button type="button" class="ghost small" data-role="remove-exercise" data-entry="${ei}">Remove</button>
+            </div>
           </div>
           <select data-role="swap-exercise" data-entry="${ei}">${exerciseOptionsHtml(entry.muscleGroup, entry.exerciseId)}</select>
-          <div class="ex-suggestion">${escapeHtml(suggestion.note || '')}</div>
+          <div class="ex-suggestion"><span class="signal-dot ${signalClass}">${signalIcon}</span> ${escapeHtml(suggestion.note || '')}</div>
         </div>
         ${setsRows}
         <div style="padding:10px 14px 14px">
           <button type="button" class="secondary small" data-role="add-set" data-entry="${ei}">+ Add Set</button>
         </div>
+        ${checkinHtml}
       </div>
     `;
+  }).join('');
+
+  // Muscle-group check-in: one row per distinct muscle in this session, in
+  // first-seen order, enabled once every exercise for that muscle is done.
+  const muscleOrder = [];
+  draft.entries.forEach((e) => { if (!muscleOrder.includes(e.muscleGroup)) muscleOrder.push(e.muscleGroup); });
+  const muscleRows = muscleOrder.map((m) => {
+    const entriesForMuscle = draft.entries.filter((e) => e.muscleGroup === m);
+    const allDone = entriesForMuscle.every(isEntryDone);
+    const current = draft.muscleFeedback ? draft.muscleFeedback[m] : null;
+    return `<div class="muscle-checkin-row">
+      <div class="muscle-checkin-label">${escapeHtml(VOLUME_LANDMARKS[m].label)}${!allDone ? ' <span class="muted small">(finish all exercises first)</span>' : ''}</div>
+      ${chipRowHtml('muscle-chip', null, m, VOLUME_CHIPS, current, !allDone)}
+    </div>`;
   }).join('');
 
   const addExerciseOptions = MUSCLE_GROUP_ORDER.map((m) => `<option value="${m}">${VOLUME_LANDMARKS[m].label}</option>`).join('');
@@ -643,6 +920,11 @@ function drawLog(container, draft, status) {
       <span class="small muted">${new Date(draft.date).toLocaleDateString()}</span>
     </div>
 
+    <div class="log-progress">
+      <div class="log-progress-track"><div class="log-progress-fill" style="width:${draft.entries.length ? Math.round((doneCount / draft.entries.length) * 100) : 0}%"></div></div>
+      <span class="log-progress-label">${doneCount}/${draft.entries.length} exercises logged</span>
+    </div>
+
     <div class="rest-pill">
       <span>⏱ Rest &nbsp;<span class="time" id="timerDisplay">${formatTime(TIMER.remaining)}</span></span>
       <span class="row">
@@ -652,6 +934,12 @@ function drawLog(container, draft, status) {
     </div>
 
     ${exerciseBlocks}
+
+    <div class="card">
+      <h2>Muscle Group Check-In</h2>
+      <p class="small muted" style="margin-top:-6px">How did overall volume feel for each muscle today?</p>
+      ${muscleRows}
+    </div>
 
     <div class="card">
       <h2>Add Exercise</h2>
@@ -707,6 +995,7 @@ function wireLogEvents(container, draft) {
           scheduleSave();
         }
       }
+      if (field === 'reps') refreshLogDynamicSections(container, draft);
     });
   });
 
@@ -748,6 +1037,39 @@ function wireLogEvents(container, draft) {
     });
   });
 
+  container.querySelectorAll('[data-role="move-exercise"]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const ei = parseInt(btn.dataset.entry, 10);
+      const dir = parseInt(btn.dataset.dir, 10);
+      const target = ei + dir;
+      if (target < 0 || target >= draft.entries.length) return;
+      const [moved] = draft.entries.splice(ei, 1);
+      draft.entries.splice(target, 0, moved);
+      scheduleSave();
+      drawLog(container, draft, mesoStatus(STATE.meso, STATE.sessions));
+    });
+  });
+
+  container.querySelectorAll('[data-role="toggle-notes"]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const key = `${btn.dataset.entry}:${btn.dataset.set}`;
+      if (expandedNotes.has(key)) expandedNotes.delete(key); else expandedNotes.add(key);
+      drawLog(container, draft, mesoStatus(STATE.meso, STATE.sessions));
+    });
+  });
+
+  wireCheckinChips(container, draft, container);
+
+  container.querySelectorAll('[data-role="muscle-chip"]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      if (btn.disabled) return;
+      draft.muscleFeedback = draft.muscleFeedback || {};
+      draft.muscleFeedback[btn.dataset.group] = btn.dataset.value;
+      scheduleSave();
+      drawLog(container, draft, mesoStatus(STATE.meso, STATE.sessions));
+    });
+  });
+
   const addMuscleSelect = container.querySelector('#addMuscleSelect');
   const addExerciseSelect = container.querySelector('#addExerciseSelect');
   if (addMuscleSelect) {
@@ -763,7 +1085,8 @@ function wireLogEvents(container, draft) {
       if (!exerciseId) return;
       draft.entries.push({
         exerciseId, muscleGroup, targetSets: 2,
-        sets: Array.from({ length: 2 }, () => ({ weight: '', reps: '', rir: '', tempo: '', notes: '' }))
+        sets: Array.from({ length: 2 }, () => ({ weight: '', reps: '', rir: '', tempo: '', notes: '' })),
+        feedback: null
       });
       scheduleSave();
       drawLog(container, draft, mesoStatus(STATE.meso, STATE.sessions));
@@ -775,6 +1098,7 @@ function wireLogEvents(container, draft) {
     finishBtn.addEventListener('click', async () => {
       if (!confirm('Finish and save this workout?')) return;
       draft.completed = true;
+      draft.completedAt = new Date().toISOString();
       await DB.updateSession(draft.id, draft);
       STATE.sessions = await DB.getAllSessions();
       STATE.draft = null;
@@ -861,16 +1185,7 @@ function renderProgress(container) {
 function drawProgress(container, selectedExerciseId) {
   const completed = STATE.sessions.filter((s) => s.completed).sort((a, b) => (a.date < b.date ? 1 : -1));
 
-  const historyRows = completed.slice(0, 25).map((s) => {
-    const setCount = (s.entries || []).reduce((sum, e) => sum + loggedSetCount(e.sets), 0);
-    return `<div class="list-row">
-      <div>
-        <div class="primary">${escapeHtml(s.dayLabel)}${s.isDeload ? ' <span class="badge deload">deload</span>' : ''}</div>
-        <div class="secondary">${new Date(s.date).toLocaleDateString()} &middot; ${(s.entries || []).length} exercises</div>
-      </div>
-      <span class="trailing num">${setCount} sets</span>
-    </div>`;
-  }).join('');
+  const historyRows = completed.slice(0, 25).map(sessionRowHtml).join('');
 
   const loggedExerciseIds = Array.from(new Set(
     completed.flatMap((s) => (s.entries || []).map((e) => e.exerciseId))
@@ -917,6 +1232,83 @@ function drawProgress(container, selectedExerciseId) {
   container.innerHTML = appShell(body, 'progress', 'Progress', `${completed.length} workouts logged`);
   const sel = container.querySelector('#progressExerciseSelect');
   sel.addEventListener('change', () => drawProgress(container, sel.value || null));
+  wireSessionRows(container, 'progress');
+}
+
+// ---------------------------------------------------------------------------
+// Session detail (drill into one logged or in-progress workout)
+// ---------------------------------------------------------------------------
+async function renderSessionDetail(container, idParam) {
+  const id = parseInt(idParam, 10);
+  let session = STATE.sessions.find((s) => s.id === id);
+  if (!session) session = await DB.getSession(id);
+  if (!session) {
+    container.innerHTML = appShell(
+      `<div class="card"><h2>Not Found</h2><p>That workout no longer exists.</p><a class="btn block" href="#/progress">Back to Progress</a></div>`,
+      'progress', 'Workout', ''
+    );
+    return;
+  }
+
+  const sum = sessionSummary(session);
+  const units = STATE.settings.units;
+
+  const exerciseRows = (session.entries || []).map((entry) => {
+    const ex = exerciseById(entry.exerciseId);
+    const setRows = (entry.sets || []).map((set, si) => {
+      const logged = set.reps !== '' && set.reps !== null && set.reps !== undefined;
+      if (!logged) return '';
+      const pr = isPRSet(STATE.sessions, session, entry.exerciseId, set.weight);
+      return `<div class="detail-set-row">
+        <span class="detail-set-num">${si + 1}</span>
+        <span class="detail-set-vals">${escapeHtml(set.weight)}${escapeHtml(units)} &times; ${escapeHtml(set.reps)}${set.rir !== '' && set.rir !== null && set.rir !== undefined ? ` @ RIR ${escapeHtml(set.rir)}` : ''}</span>
+        ${pr ? '<span class="pr-badge">PR</span>' : ''}
+        ${set.tempo ? `<span class="tag">${escapeHtml(set.tempo)}</span>` : ''}
+      </div>${set.notes ? `<div class="detail-set-note">${escapeHtml(set.notes)}</div>` : ''}`;
+    }).join('');
+
+    const fb = entry.feedback;
+    const fbHtml = fb && (fb.pain || fb.difficulty) ? `<div class="detail-feedback">
+      ${fb.pain ? `<span class="tag">Pain: ${escapeHtml(PAIN_LABELS[fb.pain] || fb.pain)}</span>` : ''}
+      ${fb.difficulty ? `<span class="tag">Felt: ${escapeHtml(DIFFICULTY_LABELS[fb.difficulty] || fb.difficulty)}</span>` : ''}
+    </div>` : '';
+
+    return `<div class="detail-exercise">
+      <div class="detail-exercise-name">${escapeHtml(ex ? ex.name : 'Unknown exercise')}</div>
+      ${setRows || '<p class="small muted">No sets logged.</p>'}
+      ${fbHtml}
+    </div>`;
+  }).join('');
+
+  const muscleFeedbackHtml = session.muscleFeedback && Object.keys(session.muscleFeedback).length
+    ? `<div class="card"><h2>Muscle Group Feedback</h2>${Object.keys(session.muscleFeedback).map((m) =>
+        `<div class="list-row"><span class="primary">${escapeHtml(VOLUME_LANDMARKS[m] ? VOLUME_LANDMARKS[m].label : m)}</span><span class="tag">${escapeHtml(DIFFICULTY_LABELS[session.muscleFeedback[m]] || session.muscleFeedback[m])}</span></div>`
+      ).join('')}</div>`
+    : '';
+
+  const body = `
+    <a href="#/progress" class="small back-link">&larr; Back to Progress</a>
+    <div class="card">
+      <div class="row between">
+        <h2 style="margin:0">${escapeHtml(session.dayLabel)}${session.isDeload ? ' <span class="badge deload">deload</span>' : ''}${!session.completed ? ' <span class="badge">in progress</span>' : ''}</h2>
+      </div>
+      <p class="small muted" style="margin:6px 0 0">${new Date(session.date).toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' })}</p>
+      <div class="detail-stat-row">
+        <div><div class="val">${sum.totalSets}</div><div class="lbl">Sets</div></div>
+        <div><div class="val">${sum.totalVolume ? sum.totalVolume.toLocaleString() : 0}</div><div class="lbl">Volume (${escapeHtml(units)})</div></div>
+        <div><div class="val">${sum.durationMin || '—'}</div><div class="lbl">Minutes</div></div>
+      </div>
+    </div>
+
+    ${exerciseRows}
+    ${muscleFeedbackHtml}
+
+    <button type="button" class="block ghost" style="color:var(--critical);border-color:var(--critical)" data-role="delete-session-detail">Delete Workout</button>
+  `;
+
+  container.innerHTML = appShell(body, 'progress', 'Workout Detail', sum.muscleLabels.join(' · '));
+  const delBtn = container.querySelector('[data-role="delete-session-detail"]');
+  if (delBtn) delBtn.addEventListener('click', () => deleteSessionFlow(session.id, 'progress'));
 }
 
 // ---------------------------------------------------------------------------

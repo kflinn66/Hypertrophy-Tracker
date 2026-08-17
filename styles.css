@@ -408,3 +408,116 @@ input.cell-input.secondary-input { font-size: 12px; font-weight: 400; }
 
 a { color: var(--accent); }
 hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
+
+/* ---------------- Set row: compact tempo/notes toggle ---------------- */
+.set-more-btn {
+  flex-shrink: 0;
+  width: 22px; height: 22px;
+  padding: 0;
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  font-size: 14px;
+  line-height: 1;
+}
+.set-more-btn.has-content { color: var(--accent); }
+.set-more-btn:active { background: var(--surface-raised); }
+
+/* ---------------- Exercise reorder + completion ---------------- */
+.reorder-btns { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.reorder-btns button.ghost.small { padding: 4px 7px; font-size: 10px; }
+.ex-card.ex-done { border-color: color-mix(in srgb, var(--good) 45%, var(--border)); }
+.ex-done-check { color: var(--good); font-weight: 900; }
+.signal-dot { font-size: 8px; vertical-align: 2px; margin-right: 2px; }
+
+/* ---------------- Log progress bar ---------------- */
+.log-progress { margin-bottom: 12px; }
+.log-progress-track { height: 6px; background: var(--track-bg); border-radius: 4px; overflow: hidden; }
+.log-progress-fill { height: 100%; background: var(--accent); border-radius: 4px; transition: width .25s ease; }
+.log-progress-label { display: block; font-size: 10.5px; color: var(--muted); margin-top: 5px; font-weight: 600; }
+
+/* ---------------- Streak strip ---------------- */
+.streak-strip {
+  background: color-mix(in srgb, var(--warning) 16%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--warning) 35%, var(--border));
+  color: var(--text);
+  border-radius: 12px;
+  padding: 10px 14px;
+  font-size: 12.5px;
+  font-weight: 700;
+  margin-bottom: 14px;
+}
+
+/* ---------------- Chips (pain / difficulty / muscle-volume check-ins) ---------------- */
+.exercise-checkin { border-top: 1px solid var(--border); padding: 12px 14px 14px; }
+.checkin-row { margin-bottom: 10px; }
+.checkin-row:last-child { margin-bottom: 0; }
+.checkin-label { display: block; font-size: 10.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; font-weight: 700; margin-bottom: 6px; }
+.chip-row { display: flex; gap: 6px; flex-wrap: wrap; }
+.chip {
+  flex: 1;
+  min-width: 0;
+  background: var(--surface-raised);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 7px 8px;
+  font-size: 11.5px;
+  font-weight: 700;
+  text-align: center;
+}
+.chip:active { transform: scale(0.97); }
+.chip:disabled { opacity: 0.45; }
+.chip-none.active { background: var(--muted); color: var(--page); border-color: var(--muted); }
+.chip-mild.active { background: var(--warning); color: #1a1200; border-color: var(--warning); }
+.chip-sharp.active { background: var(--critical); color: #fff; border-color: var(--critical); }
+.chip-light.active { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+.chip-right.active { background: var(--good); color: #fff; border-color: var(--good); }
+.chip-hard.active { background: var(--serious); color: #fff; border-color: var(--serious); }
+.chip-little.active { background: var(--warning); color: #1a1200; border-color: var(--warning); }
+.chip-much.active { background: var(--serious); color: #fff; border-color: var(--serious); }
+
+.muscle-checkin-row { padding: 10px 0; border-top: 1px solid var(--border); }
+.muscle-checkin-row:first-of-type { border-top: none; padding-top: 2px; }
+.muscle-checkin-label { font-size: 12.5px; font-weight: 700; margin-bottom: 7px; }
+
+/* ---------------- Clickable list rows (session history) ---------------- */
+.list-row.clickable { cursor: pointer; transition: background .15s ease; margin: 0 -8px; padding: 11px 8px; border-radius: 10px; }
+.list-row.clickable:hover { background: var(--surface-raised); }
+.list-row.clickable:active { background: var(--surface-raised); }
+.icon-btn {
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: 8px;
+  width: 30px; height: 30px;
+  padding: 0;
+  font-size: 13px;
+}
+.icon-btn:active { background: var(--surface-raised); color: var(--critical); }
+
+/* ---------------- Session detail ---------------- */
+.back-link { display: inline-block; margin-bottom: 10px; text-decoration: none; font-weight: 600; }
+.detail-stat-row { display: flex; gap: 8px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
+.detail-stat-row > div { flex: 1; text-align: center; }
+.detail-stat-row .val { font-size: 18px; font-weight: 700; }
+.detail-stat-row .lbl { font-size: 9.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; margin-top: 2px; }
+.detail-exercise { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 14px; margin-bottom: 10px; }
+.detail-exercise-name { font-weight: 700; font-size: 14px; margin-bottom: 8px; }
+.detail-set-row { display: flex; align-items: center; gap: 8px; padding: 5px 0; font-size: 13px; }
+.detail-set-num { width: 18px; height: 18px; border-radius: 50%; background: var(--surface-raised); color: var(--muted); font-size: 10px; font-weight: 700; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.detail-set-vals { font-variant-numeric: tabular-nums; font-weight: 600; }
+.detail-set-note { font-size: 11px; color: var(--muted); padding: 0 0 5px 26px; font-style: italic; }
+.detail-feedback { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); display: flex; gap: 6px; flex-wrap: wrap; }
+.pr-badge {
+  display: inline-block;
+  background: var(--good);
+  color: #fff;
+  font-size: 9.5px;
+  font-weight: 900;
+  padding: 2px 6px;
+  border-radius: 8px;
+  letter-spacing: .03em;
+}
