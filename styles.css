@@ -391,24 +391,31 @@ input.cell-input.secondary-input { font-size: 12px; font-weight: 400; }
 .set-extra-row { display: flex; gap: 8px; padding: 0 14px 10px 44px; }
 .set-row-actions { flex-shrink: 0; }
 
-.rest-pill {
-  position: sticky;
-  top: 8px;
-  z-index: 5;
-  background: var(--accent);
-  color: var(--accent-text);
-  padding: 10px 16px;
-  border-radius: 30px;
-  margin: 0 0 14px;
+/* ---------------- Exercise card footer + rest timer badge ---------------- */
+.ex-footer {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-weight: 700;
-  font-size: 13px;
-  box-shadow: 0 4px 14px rgba(0,0,0,0.25);
+  gap: 8px;
+  padding: 10px 14px 14px;
 }
-.rest-pill .time { font-size: 16px; font-variant-numeric: tabular-nums; }
-.rest-pill button { background: rgba(255,255,255,0.2); padding: 5px 10px; font-size: 11px; border-radius: 20px; }
+.ex-timer-badge {
+  flex-shrink: 0;
+  align-items: center;
+  gap: 5px;
+  background: var(--accent);
+  color: var(--accent-text);
+  padding: 6px 12px;
+  border-radius: 20px;
+  font-weight: 700;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+  animation: timer-pop .15s ease;
+}
+@keyframes timer-pop { from { transform: scale(0.85); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+.ex-timer-icon { font-size: 12px; }
+.ex-timer-badge:active { background: var(--accent-dark); }
 
 .empty-state { text-align: center; padding: 34px 10px; color: var(--muted); font-size: 13px; }
 

@@ -22,7 +22,7 @@ async function boot() {
   STATE.meso = await DB.getActiveMesocycle();
   STATE.sessions = await DB.getAllSessions();
   STATE.customExercises = await DB.getAllCustomExercises();
-  TIMER.remaining = STATE.settings.restTimerSeconds || 120;
+  TIMER.remaining = STATE.settings.restTimerSeconds || 105;
   TIMER.total = TIMER.remaining;
   applyTheme(STATE.settings.theme || 'dark');
 
@@ -546,7 +546,7 @@ async function completeOnboarding() {
     targetRIR: goalPreset.targetRIR,
     repRangeMin: goalPreset.repRangeMin,
     repRangeMax: goalPreset.repRangeMax,
-    restTimerSeconds: (STATE.settings && STATE.settings.restTimerSeconds) || 120
+    restTimerSeconds: (STATE.settings && STATE.settings.restTimerSeconds) || 105
   });
   STATE.settings = await DB.getSettings();
   STATE.sessions = await DB.getAllSessions();
@@ -940,8 +940,11 @@ function drawLog(container, draft, status) {
           <div class="ex-suggestion"><span class="signal-dot ${signalClass}">${signalIcon}</span> ${escapeHtml(suggestion.note || '')}</div>
         </div>
         ${setsRows}
-        <div style="padding:10px 14px 14px">
+        <div class="ex-footer">
           <button type="button" class="secondary small" data-role="add-set" data-entry="${ei}">+ Add Set</button>
+          <button type="button" class="ex-timer-badge" data-role="ex-timer-badge" style="display:${TIMER.running ? 'inline-flex' : 'none'}" aria-label="Rest timer, tap to cancel">
+            <span class="ex-timer-icon">&#9201;</span><span class="ex-timer-time" data-role="ex-timer-time">${formatTime(TIMER.remaining)}</span>
+          </button>
         </div>
         ${feedbackHtml}
       </div>
@@ -983,14 +986,6 @@ function drawLog(container, draft, status) {
     <div class="log-progress">
       <div class="log-progress-track"><div class="log-progress-fill" style="width:${draft.entries.length ? Math.round((doneCount / draft.entries.length) * 100) : 0}%"></div></div>
       <span class="log-progress-label">${doneCount}/${draft.entries.length} exercises logged</span>
-    </div>
-
-    <div class="rest-pill">
-      <span>⏱ Rest &nbsp;<span class="time" id="timerDisplay">${formatTime(TIMER.remaining)}</span></span>
-      <span class="row">
-        <button type="button" data-role="timer-toggle">${TIMER.running ? 'Pause' : 'Start'}</button>
-        <button type="button" data-role="timer-reset">Reset</button>
-      </span>
     </div>
 
     ${exerciseBlocks}
@@ -1136,11 +1131,17 @@ function wireLogEvents(container, draft) {
       const wasEntryDone = isEntryDone(entry);
       const wasMuscleDone = entriesForMuscle.every(isEntryDone);
 
-      entry.sets[si].done = !entry.sets[si].done;
+      const justCompleted = !entry.sets[si].done;
+      entry.sets[si].done = justCompleted;
       scheduleSave();
 
       const nowEntryDone = isEntryDone(entry);
       const nowMuscleDone = entriesForMuscle.every(isEntryDone);
+
+      // Completing a set (not un-completing) always kicks off a fresh rest
+      // timer -- no button to press. If one was already counting down from
+      // the previous set, this restarts it at the full rest duration.
+      if (justCompleted) restartRestTimer();
 
       drawLog(container, draft, mesoStatus(STATE.meso, STATE.sessions));
 
@@ -1154,6 +1155,10 @@ function wireLogEvents(container, draft) {
         openMuscleCheckinModal(draft, muscleGroup, container);
       }
     });
+  });
+
+  container.querySelectorAll('[data-role="ex-timer-badge"]').forEach((btn) => {
+    btn.addEventListener('click', () => cancelRestTimer());
   });
 
   container.querySelectorAll('[data-role="edit-checkin"]').forEach((btn) => {
@@ -1202,7 +1207,7 @@ function wireLogEvents(container, draft) {
       await DB.updateSession(draft.id, draft);
       STATE.sessions = await DB.getAllSessions();
       STATE.draft = null;
-      stopTimer();
+      cancelRestTimer();
       goTo('dashboard');
       renderRoute();
     });
@@ -1215,20 +1220,19 @@ function wireLogEvents(container, draft) {
       await DB.deleteSession(draft.id);
       STATE.sessions = await DB.getAllSessions();
       STATE.draft = null;
-      stopTimer();
+      cancelRestTimer();
       goTo('dashboard');
       renderRoute();
     });
   }
 
-  const timerToggle = container.querySelector('[data-role="timer-toggle"]');
-  if (timerToggle) timerToggle.addEventListener('click', () => { toggleTimer(); timerToggle.textContent = TIMER.running ? 'Pause' : 'Start'; });
-  const timerReset = container.querySelector('[data-role="timer-reset"]');
-  if (timerReset) timerReset.addEventListener('click', () => { resetTimer(); if (timerToggle) timerToggle.textContent = 'Start'; });
 }
 
 // ---------------------------------------------------------------------------
-// Rest timer
+// Rest timer -- no buttons. Marking any set complete automatically (re)starts
+// a countdown from restTimerSeconds (default 1:45); a badge showing the time
+// left appears in the lower-right of every exercise card's footer, next to
+// "+ Add Set", and a chime plays when it hits zero. Tapping the badge cancels it.
 // ---------------------------------------------------------------------------
 function formatTime(sec) {
   sec = Math.max(0, Math.round(sec));
@@ -1237,42 +1241,72 @@ function formatTime(sec) {
   return `${m}:${s < 10 ? '0' : ''}${s}`;
 }
 
-function toggleTimer() {
-  if (TIMER.running) { pauseTimer(); } else { startTimer(); }
+function updateTimerDisplays() {
+  const time = formatTime(TIMER.remaining);
+  document.querySelectorAll('[data-role="ex-timer-time"]').forEach((el) => { el.textContent = time; });
+  document.querySelectorAll('[data-role="ex-timer-badge"]').forEach((el) => { el.style.display = TIMER.running ? 'inline-flex' : 'none'; });
 }
 
-function startTimer() {
-  if (TIMER.running) return;
+// Lazily created, reused AudioContext for the completion chime. Created (or
+// resumed) from restartRestTimer(), which only ever runs off a real tap on
+// the set-complete checkmark -- that user gesture is what lets the browser's
+// autoplay policy allow audio later when the interval callback fires on its own.
+let audioCtx = null;
+function ensureAudioContext() {
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  if (!Ctx) return null;
+  if (!audioCtx) audioCtx = new Ctx();
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  return audioCtx;
+}
+
+function playChime() {
+  const ctx = ensureAudioContext();
+  if (!ctx) return;
+  const now = ctx.currentTime;
+  [{ t: 0, f: 880 }, { t: 0.16, f: 1175 }].forEach(({ t, f }) => {
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.value = f;
+    gain.gain.setValueAtTime(0, now + t);
+    gain.gain.linearRampToValueAtTime(0.25, now + t + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + t + 0.4);
+    osc.connect(gain).connect(ctx.destination);
+    osc.start(now + t);
+    osc.stop(now + t + 0.45);
+  });
+}
+
+function restartRestTimer() {
+  if (TIMER.intervalId) clearInterval(TIMER.intervalId);
+  ensureAudioContext();
+  TIMER.total = STATE.settings.restTimerSeconds || 105;
+  TIMER.remaining = TIMER.total;
   TIMER.running = true;
   TIMER.intervalId = setInterval(() => {
     TIMER.remaining -= 1;
-    const display = document.getElementById('timerDisplay');
-    if (display) display.textContent = formatTime(TIMER.remaining);
     if (TIMER.remaining <= 0) {
-      stopTimer();
+      clearInterval(TIMER.intervalId);
+      TIMER.intervalId = null;
+      TIMER.running = false;
+      TIMER.remaining = TIMER.total;
+      updateTimerDisplays();
       if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
-      const toggleBtn = document.querySelector('[data-role="timer-toggle"]');
-      if (toggleBtn) toggleBtn.textContent = 'Start';
+      playChime();
+      return;
     }
+    updateTimerDisplays();
   }, 1000);
+  updateTimerDisplays();
 }
 
-function pauseTimer() {
-  TIMER.running = false;
+function cancelRestTimer() {
   if (TIMER.intervalId) clearInterval(TIMER.intervalId);
-}
-
-function stopTimer() {
-  pauseTimer();
+  TIMER.intervalId = null;
+  TIMER.running = false;
   TIMER.remaining = TIMER.total;
-}
-
-function resetTimer() {
-  pauseTimer();
-  TIMER.remaining = STATE.settings.restTimerSeconds || 120;
-  TIMER.total = TIMER.remaining;
-  const display = document.getElementById('timerDisplay');
-  if (display) display.textContent = formatTime(TIMER.remaining);
+  updateTimerDisplays();
 }
 
 // ---------------------------------------------------------------------------
@@ -1575,7 +1609,7 @@ function renderSettings(container) {
     const targetRIR = parseFloat(container.querySelector('#setTargetRIR').value) || DEFAULT_TARGET_RIR;
     const repRangeMin = parseInt(container.querySelector('#setRepMin').value, 10) || 8;
     const repRangeMax = parseInt(container.querySelector('#setRepMax').value, 10) || 12;
-    const restTimerSeconds = parseInt(container.querySelector('#setRestTimer').value, 10) || 120;
+    const restTimerSeconds = parseInt(container.querySelector('#setRestTimer').value, 10) || 105;
     await DB.saveSettings({ units, targetRIR, repRangeMin, repRangeMax, restTimerSeconds });
     STATE.settings = await DB.getSettings();
     TIMER.remaining = STATE.settings.restTimerSeconds;

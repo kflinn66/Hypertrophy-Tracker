@@ -122,7 +122,7 @@ const DB = {
     return existing || {
       id: 'main',
       units: 'lbs',
-      restTimerSeconds: 120,
+      restTimerSeconds: 105,
       onboarded: false,
       theme: 'dark',
       goal: 'hypertrophy'
