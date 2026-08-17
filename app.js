@@ -9,7 +9,7 @@ const STATE = {
   customExercises: []
 };
 
-const TIMER = { remaining: 120, running: false, intervalId: null, total: 120 };
+const TIMER = { remaining: 105, running: false, intervalId: null, total: 105, activeEntryIndex: null };
 
 // ---------------------------------------------------------------------------
 // Boot
@@ -942,7 +942,7 @@ function drawLog(container, draft, status) {
         ${setsRows}
         <div class="ex-footer">
           <button type="button" class="secondary small" data-role="add-set" data-entry="${ei}">+ Add Set</button>
-          <button type="button" class="ex-timer-badge" data-role="ex-timer-badge" style="display:${TIMER.running ? 'inline-flex' : 'none'}" aria-label="Rest timer, tap to cancel">
+          <button type="button" class="ex-timer-badge" data-role="ex-timer-badge" data-entry="${ei}" style="display:${(TIMER.running && TIMER.activeEntryIndex === ei) ? 'inline-flex' : 'none'}" aria-label="Rest timer, tap to cancel">
             <span class="ex-timer-icon">&#9201;</span><span class="ex-timer-time" data-role="ex-timer-time">${formatTime(TIMER.remaining)}</span>
           </button>
         </div>
@@ -1140,8 +1140,17 @@ function wireLogEvents(container, draft) {
 
       // Completing a set (not un-completing) always kicks off a fresh rest
       // timer -- no button to press. If one was already counting down from
-      // the previous set, this restarts it at the full rest duration.
-      if (justCompleted) restartRestTimer();
+      // the previous set, this restarts it at the full rest duration. It only
+      // shows on the exercise you're actively working -- unless that set was
+      // the exercise's last one, in which case you're moving on, so the timer
+      // follows to the next exercise block instead (falling back to the same
+      // card if this was the last exercise in the workout).
+      if (justCompleted) {
+        TIMER.activeEntryIndex = nowEntryDone
+          ? (ei + 1 < draft.entries.length ? ei + 1 : ei)
+          : ei;
+        restartRestTimer();
+      }
 
       drawLog(container, draft, mesoStatus(STATE.meso, STATE.sessions));
 
@@ -1241,10 +1250,19 @@ function formatTime(sec) {
   return `${m}:${s < 10 ? '0' : ''}${s}`;
 }
 
+// Only the badge on the active exercise card is ever shown -- every other
+// card's badge (and there's one rendered in each, ready to go) stays hidden.
 function updateTimerDisplays() {
   const time = formatTime(TIMER.remaining);
-  document.querySelectorAll('[data-role="ex-timer-time"]').forEach((el) => { el.textContent = time; });
-  document.querySelectorAll('[data-role="ex-timer-badge"]').forEach((el) => { el.style.display = TIMER.running ? 'inline-flex' : 'none'; });
+  document.querySelectorAll('[data-role="ex-timer-badge"]').forEach((el) => {
+    const ei = parseInt(el.dataset.entry, 10);
+    const show = TIMER.running && ei === TIMER.activeEntryIndex;
+    el.style.display = show ? 'inline-flex' : 'none';
+    if (show) {
+      const timeEl = el.querySelector('[data-role="ex-timer-time"]');
+      if (timeEl) timeEl.textContent = time;
+    }
+  });
 }
 
 // Lazily created, reused AudioContext for the completion chime. Created (or
@@ -1291,6 +1309,7 @@ function restartRestTimer() {
       TIMER.intervalId = null;
       TIMER.running = false;
       TIMER.remaining = TIMER.total;
+      TIMER.activeEntryIndex = null;
       updateTimerDisplays();
       if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
       playChime();
@@ -1306,6 +1325,7 @@ function cancelRestTimer() {
   TIMER.intervalId = null;
   TIMER.running = false;
   TIMER.remaining = TIMER.total;
+  TIMER.activeEntryIndex = null;
   updateTimerDisplays();
 }
 
