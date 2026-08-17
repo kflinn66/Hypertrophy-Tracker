@@ -22,6 +22,8 @@ function average(nums) {
 }
 
 // sessions: array of session records from DB (most recent first not required, we sort here)
+// Warm-up sets are excluded here -- they're a ramp to the working weight, not
+// a signal about whether the working weight itself should move.
 function lastLoggedSetsForExercise(sessions, exerciseId) {
   const withExercise = sessions
     .filter((s) => s.entries && s.entries.some((e) => e.exerciseId === exerciseId))
@@ -31,10 +33,20 @@ function lastLoggedSetsForExercise(sessions, exerciseId) {
   const entry = withExercise[0].entries.find((e) => e.exerciseId === exerciseId);
   return {
     date: withExercise[0].date,
-    sets: entry.sets || [],
+    sets: (entry.sets || []).filter((s) => !s.warmup),
     isDeload: !!withExercise[0].isDeload,
     feedback: entry.feedback || null
   };
+}
+
+// Epley formula: estimated one-rep max from a working set's weight x reps.
+// Used for PR detection so a heavier-but-lower-rep or lighter-but-higher-rep
+// set can still be correctly flagged as a new best, not just raw weight.
+function estimated1RM(weight, reps) {
+  const w = parseFloat(weight), r = parseFloat(reps);
+  if (!isFinite(w) || !isFinite(r) || w <= 0 || r <= 0) return null;
+  if (r === 1) return w;
+  return w * (1 + r / 30);
 }
 
 // Looks at the last time this muscle group appeared in a session and returns
@@ -98,9 +110,11 @@ function getProgressionSuggestion(exerciseId, sessions, options) {
     };
   }
 
-  const weights = last.sets.map((s) => s.weight).filter((w) => typeof w === 'number');
-  const reps = last.sets.map((s) => s.reps);
-  const rirs = last.sets.map((s) => s.rir);
+  // Logged fields come in as strings straight from the input boxes -- parse
+  // them to numbers here rather than relying on typeof checks downstream.
+  const weights = last.sets.map((s) => parseFloat(s.weight)).filter((w) => isFinite(w));
+  const reps = last.sets.map((s) => parseFloat(s.reps)).filter((n) => isFinite(n));
+  const rirs = last.sets.map((s) => parseFloat(s.rir)).filter((n) => isFinite(n));
 
   const lastWeight = weights.length ? weights[weights.length - 1] : null;
   const avgReps = average(reps);
@@ -192,7 +206,7 @@ function getProgressionSuggestion(exerciseId, sessions, options) {
 
 if (typeof module !== 'undefined') {
   module.exports = {
-    getProgressionSuggestion, lastLoggedSetsForExercise, lastMuscleFeedback, getVolumeFeedbackNote,
+    getProgressionSuggestion, lastLoggedSetsForExercise, lastMuscleFeedback, getVolumeFeedbackNote, estimated1RM,
     DEFAULT_TARGET_RIR, DEFAULT_REP_RANGE, GOAL_PRESETS, PAIN_LABELS, DIFFICULTY_LABELS
   };
 }

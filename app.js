@@ -12,16 +12,145 @@ const STATE = {
 const TIMER = { remaining: 105, running: false, intervalId: null, total: 105, activeEntryIndex: null };
 
 // ---------------------------------------------------------------------------
+// Toasts, confirm/message modals, save indicator, update banner
+// ---------------------------------------------------------------------------
+// Small transient notice in the corner -- used for background failures
+// (a save that didn't go through, etc.) that shouldn't block the UI the way
+// a modal does.
+function showToast(message, opts) {
+  opts = opts || {};
+  const type = opts.type || 'info';
+  let host = document.getElementById('toastHost');
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'toastHost';
+    host.className = 'toast-host';
+    document.body.appendChild(host);
+  }
+  const el = document.createElement('div');
+  el.className = `toast toast-${type}`;
+  el.textContent = message;
+  host.appendChild(el);
+  requestAnimationFrame(() => el.classList.add('show'));
+  setTimeout(() => {
+    el.classList.remove('show');
+    setTimeout(() => el.remove(), 300);
+  }, opts.duration || 3200);
+}
+
+// Generic replacements for the native confirm()/alert() -- same modal
+// look-and-feel as the exercise/muscle check-in popups so a destructive
+// action doesn't suddenly pop an unstyled browser dialog.
+function openConfirmModal(message, opts) {
+  opts = opts || {};
+  closeAnyModal();
+  const modal = document.createElement('div');
+  modal.className = 'modal-overlay';
+  modal.innerHTML = `
+    <div class="modal-card">
+      <p style="margin:0 0 18px;font-size:15px;line-height:1.4">${escapeHtml(message)}</p>
+      <div class="row">
+        <button type="button" class="secondary block" data-role="modal-cancel">${escapeHtml(opts.cancelLabel || 'Cancel')}</button>
+        <button type="button" class="block ${opts.danger ? 'danger' : ''}" data-role="modal-confirm">${escapeHtml(opts.confirmLabel || 'Confirm')}</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  const cancel = () => { modal.remove(); if (opts.onCancel) opts.onCancel(); };
+  const confirmIt = () => { modal.remove(); if (opts.onConfirm) opts.onConfirm(); };
+  modal.querySelector('[data-role="modal-cancel"]').addEventListener('click', cancel);
+  modal.querySelector('[data-role="modal-confirm"]').addEventListener('click', confirmIt);
+  modal.addEventListener('click', (e) => { if (e.target === modal) cancel(); });
+}
+
+function openMessageModal(message, opts) {
+  opts = opts || {};
+  closeAnyModal();
+  const modal = document.createElement('div');
+  modal.className = 'modal-overlay';
+  modal.innerHTML = `
+    <div class="modal-card">
+      <p style="margin:0 0 18px;font-size:15px;line-height:1.4">${escapeHtml(message)}</p>
+      <button type="button" class="block" data-role="modal-ok">${escapeHtml(opts.okLabel || 'OK')}</button>
+    </div>`;
+  document.body.appendChild(modal);
+  const cleanup = () => { modal.remove(); if (opts.onClose) opts.onClose(); };
+  modal.querySelector('[data-role="modal-ok"]').addEventListener('click', cleanup);
+  modal.addEventListener('click', (e) => { if (e.target === modal) cleanup(); });
+}
+
+// Tiny "Saving…/Saved/Save failed" label rendered next to the workout date
+// in the Log view -- the only sign you had before that anything was being
+// persisted was... nothing, so a failed write behind a debounce could be
+// silently lost. Safe to call when the element isn't on screen.
+function setSaveIndicator(state) {
+  const el = document.getElementById('saveIndicatorEl');
+  if (!el) return;
+  el.dataset.state = state;
+  el.textContent = state === 'pending' ? 'Saving…' : state === 'saved' ? 'Saved' : state === 'error' ? 'Save failed' : '';
+  if (state === 'saved') {
+    setTimeout(() => { if (el.dataset.state === 'saved') el.textContent = ''; }, 2000);
+  }
+}
+
+// Persistent bar (not a toast -- shouldn't auto-dismiss) telling you a new
+// version of the app has been fetched in the background and is ready.
+function showUpdateBanner(reg) {
+  if (document.getElementById('updateBanner')) return;
+  const el = document.createElement('div');
+  el.id = 'updateBanner';
+  el.className = 'update-banner';
+  el.innerHTML = `<span>A new version is ready.</span><button type="button" data-role="update-reload">Reload</button>`;
+  document.body.appendChild(el);
+  el.querySelector('[data-role="update-reload"]').addEventListener('click', () => {
+    if (reg.waiting) reg.waiting.postMessage('SKIP_WAITING');
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------
 async function boot() {
   if ('serviceWorker' in navigator) {
-    try { await navigator.serviceWorker.register('./service-worker.js'); } catch (e) { console.warn('SW registration failed', e); }
+    try {
+      const reg = await navigator.serviceWorker.register('./service-worker.js');
+      reg.addEventListener('updatefound', () => {
+        const newWorker = reg.installing;
+        if (!newWorker) return;
+        newWorker.addEventListener('statechange', () => {
+          // Only worth announcing if there's an OLD worker already controlling
+          // the page -- on first install there's nothing to "update" from.
+          if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
+            showUpdateBanner(reg);
+          }
+        });
+      });
+      let reloadedForUpdate = false;
+      navigator.serviceWorker.addEventListener('controllerchange', () => {
+        if (reloadedForUpdate) return;
+        reloadedForUpdate = true;
+        location.reload();
+      });
+    } catch (e) { console.warn('SW registration failed', e); }
   }
-  STATE.settings = await DB.getSettings();
-  STATE.meso = await DB.getActiveMesocycle();
-  STATE.sessions = await DB.getAllSessions();
-  STATE.customExercises = await DB.getAllCustomExercises();
+  // Ask the browser not to evict this origin's storage under pressure --
+  // best-effort and silently ignored where unsupported (e.g. iOS Safari).
+  if (navigator.storage && navigator.storage.persist) {
+    try { await navigator.storage.persist(); } catch (e) { /* best effort */ }
+  }
+  try {
+    STATE.settings = await DB.getSettings();
+    STATE.meso = await DB.getActiveMesocycle();
+    STATE.sessions = await DB.getAllSessions();
+    STATE.customExercises = await DB.getAllCustomExercises();
+  } catch (e) {
+    console.error('Failed to load app data', e);
+    document.getElementById('app').innerHTML = `<div class="view"><div class="card">
+      <h2>Couldn't load your data</h2>
+      <p>Something went wrong reading your workout data from this browser. Try reloading the page. If this keeps happening, your device's storage may be full.</p>
+      <button class="block" onclick="location.reload()">Reload</button>
+    </div></div>`;
+    return;
+  }
   TIMER.remaining = STATE.settings.restTimerSeconds || 105;
   TIMER.total = TIMER.remaining;
   applyTheme(STATE.settings.theme || 'dark');
@@ -126,8 +255,17 @@ function mesoStatus(meso, sessions) {
   return { count, weekIndex, totalWeeks, isDeload, isComplete, dayIndex, currentWeekSessions };
 }
 
+// Warm-up sets don't count toward the volume/set totals shown here -- they're
+// a ramp, not working volume the muscle needs to recover from.
 function loggedSetCount(sets) {
-  return (sets || []).filter((s) => s.reps !== '' && s.reps !== null && s.reps !== undefined && !isNaN(parseFloat(s.reps))).length;
+  return (sets || []).filter((s) => !s.warmup && s.reps !== '' && s.reps !== null && s.reps !== undefined && !isNaN(parseFloat(s.reps))).length;
+}
+
+// Shared shortcut for the "finished workouts only" filter used all over
+// (dashboard stats, streak, progress history, PR lookups) so it isn't
+// hand-rolled slightly differently in five different places.
+function completedSessions(sessions) {
+  return (sessions || []).filter((s) => s.completed);
 }
 
 // Compact summary of a completed session used anywhere it's listed as a row:
@@ -136,6 +274,7 @@ function sessionSummary(session) {
   const entries = session.entries || [];
   const totalSets = entries.reduce((sum, e) => sum + loggedSetCount(e.sets), 0);
   const totalVolume = entries.reduce((sum, e) => sum + (e.sets || []).reduce((s, set) => {
+    if (set.warmup) return s;
     const w = parseFloat(set.weight), r = parseFloat(set.reps);
     return s + (isFinite(w) && isFinite(r) ? w * r : 0);
   }, 0), 0);
@@ -148,11 +287,23 @@ function sessionSummary(session) {
   return { totalSets, totalVolume: Math.round(totalVolume), muscleLabels, exerciseCount: entries.length, durationMin };
 }
 
+// True when it's been a while (or never) since the last export -- drives the
+// dismissible "back up your data" nudge on the dashboard. Doesn't nag brand
+// new accounts with nothing worth losing yet.
+function shouldShowBackupNudge(settings, sessions) {
+  const completedCount = completedSessions(sessions).length;
+  if (completedCount < 3) return false;
+  const cutoff = Date.now() - 14 * 24 * 60 * 60 * 1000;
+  if (settings.lastExportAt && new Date(settings.lastExportAt).getTime() > cutoff) return false;
+  if (settings.backupNudgeDismissedAt && new Date(settings.backupNudgeDismissedAt).getTime() > cutoff) return false;
+  return true;
+}
+
 // Current consecutive-week training streak: counts backward from this week
 // as long as each week hit at least one completed session, for the little
 // momentum badge on the dashboard.
 function computeTrainingStreak(sessions) {
-  const completed = sessions.filter((s) => s.completed).map((s) => new Date(s.date));
+  const completed = completedSessions(sessions).map((s) => new Date(s.date));
   if (completed.length === 0) return 0;
   const weekKey = (d) => {
     const t = new Date(d);
@@ -170,29 +321,42 @@ function computeTrainingStreak(sessions) {
   return streak;
 }
 
-// True if this set's weight is the highest ever logged for this exercise as
-// of (and including) the given session -- a simple personal-best flag.
-function isPRSet(allSessions, session, exerciseId, weight) {
-  const w = parseFloat(weight);
-  if (!isFinite(w) || w <= 0) return false;
+// True if this set's estimated one-rep max (Epley) is the highest ever
+// logged for this exercise as of (and including) the given session -- a
+// personal-best flag that credits a heavier-lower-rep or lighter-higher-rep
+// set fairly instead of only ever recognizing raw weight going up. Warm-up
+// sets never count as -- or against -- a PR.
+function isPRSet(allSessions, session, exerciseId, weight, reps) {
+  const e1rm = estimated1RM(weight, reps);
+  if (e1rm === null) return false;
   const priorBest = allSessions
     .filter((s) => s.completed && new Date(s.date) < new Date(session.date))
     .flatMap((s) => (s.entries || []).filter((e) => e.exerciseId === exerciseId))
-    .flatMap((e) => e.sets || [])
+    .flatMap((e) => (e.sets || []).filter((set) => !set.warmup))
     .reduce((best, set) => {
-      const sw = parseFloat(set.weight);
-      return isFinite(sw) && sw > best ? sw : best;
+      const rm = estimated1RM(set.weight, set.reps);
+      return rm !== null && rm > best ? rm : best;
     }, 0);
-  return w > priorBest;
+  return e1rm > priorBest;
 }
 
-async function deleteSessionFlow(id, afterRoute) {
-  if (!confirm('Delete this workout? This cannot be undone.')) return;
-  await DB.deleteSession(id);
-  STATE.sessions = await DB.getAllSessions();
-  if (STATE.draft && STATE.draft.id === id) STATE.draft = null;
-  goTo(afterRoute || 'progress');
-  renderRoute();
+function deleteSessionFlow(id, afterRoute) {
+  openConfirmModal('Delete this workout? This cannot be undone.', {
+    danger: true,
+    confirmLabel: 'Delete',
+    onConfirm: async () => {
+      try {
+        await DB.deleteSession(id);
+        STATE.sessions = await DB.getAllSessions();
+        if (STATE.draft && STATE.draft.id === id) STATE.draft = null;
+        goTo(afterRoute || 'progress');
+        renderRoute();
+      } catch (err) {
+        console.error('Failed to delete workout', err);
+        showToast('Could not delete that workout.', { type: 'error' });
+      }
+    }
+  });
 }
 
 // Shared clickable row used on the Dashboard's Recent Sessions and the
@@ -433,7 +597,7 @@ function drawOnboarding(container, opts) {
       if (idx >= 0) {
         list.splice(idx, 1);
       } else {
-        if (list.length >= 3) { alert('Pick up to 3 priority muscle groups for the biggest effect.'); return; }
+        if (list.length >= 3) { openMessageModal('Pick up to 3 priority muscle groups for the biggest effect.'); return; }
         list.push(m);
       }
       drawOnboarding(container, opts);
@@ -506,54 +670,59 @@ async function completeOnboarding() {
   const draft = onboardingDraft;
   let plan;
   if (draft.mode === 'custom') {
-    if (!draft.customDays || draft.customDays.length === 0) { alert('Add at least one training day.'); return; }
+    if (!draft.customDays || draft.customDays.length === 0) { openMessageModal('Add at least one training day.'); return; }
     for (const d of draft.customDays) {
-      if (!d.exercises || d.exercises.length === 0) { alert(`Add at least one exercise to "${d.dayLabel}".`); return; }
+      if (!d.exercises || d.exercises.length === 0) { openMessageModal(`Add at least one exercise to "${d.dayLabel}".`); return; }
     }
     try {
       plan = buildCustomPlan(draft.customDays.map((d) => ({ dayLabel: d.dayLabel || 'Day', exercises: d.exercises })), draft.priorityMuscles || []);
     } catch (err) {
-      alert(err.message);
+      openMessageModal(err.message);
       return;
     }
   } else {
     plan = buildPlan(draft.splitKey, draft.days, draft.priorityMuscles || []);
   }
 
-  if (STATE.meso) {
-    await DB.updateMesocycle(STATE.meso.id, { active: false });
+  try {
+    if (STATE.meso) {
+      await DB.updateMesocycle(STATE.meso.id, { active: false });
+    }
+
+    const newMeso = {
+      splitKey: draft.mode === 'custom' ? 'custom' : draft.splitKey,
+      daysPerWeek: draft.mode === 'custom' ? draft.customDays.length : draft.days,
+      trainingWeeks: Math.max(1, draft.trainingWeeks || 4),
+      startDate: new Date().toISOString(),
+      plan,
+      active: true,
+      createdAt: new Date().toISOString()
+    };
+    const id = await DB.addMesocycle(newMeso);
+    newMeso.id = id;
+    STATE.meso = newMeso;
+
+    const goalPreset = GOAL_PRESETS[draft.goal] || GOAL_PRESETS.hypertrophy;
+    await DB.saveSettings({
+      onboarded: true,
+      units: draft.units,
+      goal: draft.goal,
+      priorityMuscles: draft.priorityMuscles || [],
+      targetRIR: goalPreset.targetRIR,
+      repRangeMin: goalPreset.repRangeMin,
+      repRangeMax: goalPreset.repRangeMax,
+      restTimerSeconds: (STATE.settings && STATE.settings.restTimerSeconds) || 105
+    });
+    STATE.settings = await DB.getSettings();
+    STATE.sessions = await DB.getAllSessions();
+    STATE.draft = null;
+    onboardingDraft = null;
+    goTo('dashboard');
+    renderRoute();
+  } catch (err) {
+    console.error('Failed to save your plan', err);
+    showToast('Could not save your plan — please try again.', { type: 'error', duration: 5000 });
   }
-
-  const newMeso = {
-    splitKey: draft.mode === 'custom' ? 'custom' : draft.splitKey,
-    daysPerWeek: draft.mode === 'custom' ? draft.customDays.length : draft.days,
-    trainingWeeks: Math.max(1, draft.trainingWeeks || 4),
-    startDate: new Date().toISOString(),
-    plan,
-    active: true,
-    createdAt: new Date().toISOString()
-  };
-  const id = await DB.addMesocycle(newMeso);
-  newMeso.id = id;
-  STATE.meso = newMeso;
-
-  const goalPreset = GOAL_PRESETS[draft.goal] || GOAL_PRESETS.hypertrophy;
-  await DB.saveSettings({
-    onboarded: true,
-    units: draft.units,
-    goal: draft.goal,
-    priorityMuscles: draft.priorityMuscles || [],
-    targetRIR: goalPreset.targetRIR,
-    repRangeMin: goalPreset.repRangeMin,
-    repRangeMax: goalPreset.repRangeMax,
-    restTimerSeconds: (STATE.settings && STATE.settings.restTimerSeconds) || 105
-  });
-  STATE.settings = await DB.getSettings();
-  STATE.sessions = await DB.getAllSessions();
-  STATE.draft = null;
-  onboardingDraft = null;
-  goTo('dashboard');
-  renderRoute();
 }
 
 // ---------------------------------------------------------------------------
@@ -585,7 +754,7 @@ function renderDashboard(container) {
     const weekLabel = status.isDeload ? 'Deload' : `Wk ${status.weekIndex + 1}/${STATE.meso.trainingWeeks}`;
     const todayDay = plan.days[status.dayIndex];
     const volumeTotals = computeWeeklyVolume(STATE.meso, status.currentWeekSessions, STATE.draft);
-    const totalCompleted = STATE.sessions.filter((s) => s.completed).length;
+    const totalCompleted = completedSessions(STATE.sessions).length;
 
     const muscleKeys = MUSCLE_GROUP_ORDER.filter((m) => plan.weeklyTargets[m] !== undefined);
     const statuses = muscleKeys.map((m) => classifyVolume(m, volumeTotals[m] || 0));
@@ -606,14 +775,22 @@ function renderDashboard(container) {
       </div>`;
     }).join('');
 
-    const recent = STATE.sessions.filter((s) => s.completed).sort((a, b) => (a.date < b.date ? 1 : -1)).slice(0, 3);
+    const recent = completedSessions(STATE.sessions).sort((a, b) => (a.date < b.date ? 1 : -1)).slice(0, 3);
     const recentHtml = recent.length
       ? recent.map(sessionRowHtml).join('')
       : `<p class="empty-state">No workouts logged yet.</p>`;
     const streak = computeTrainingStreak(STATE.sessions);
+    const showBackupNudge = shouldShowBackupNudge(STATE.settings, STATE.sessions);
 
     body = `
       ${streak >= 2 ? `<div class="streak-strip">&#128293; ${streak}-week training streak &mdash; keep it going</div>` : ''}
+      ${showBackupNudge ? `
+      <div class="card backup-nudge">
+        <button type="button" class="modal-close" data-role="dismiss-backup-nudge" aria-label="Dismiss">&times;</button>
+        <h2>Back up your data</h2>
+        <p class="small muted" style="margin-top:-4px">Your workouts live only in this browser. It only takes a second to export a copy.</p>
+        <a class="btn secondary block" href="#/settings">Export Backup</a>
+      </div>` : ''}
       <div class="stat-row">
         <div class="stat-tile clickable" data-role="stat-workouts" role="button" tabindex="0" aria-label="View session history"><div class="val">${totalCompleted}</div><div class="lbl">Workouts</div></div>
         <div class="stat-tile clickable" data-role="stat-week" role="button" tabindex="0" aria-label="View plan details"><div class="val">${weekLabel}</div><div class="lbl">${escapeHtml(plan.splitName)}</div></div>
@@ -657,6 +834,20 @@ function renderDashboard(container) {
     const heading = Array.from(container.querySelectorAll('.card h2')).find((h) => h.textContent.trim() === "This Week's Volume");
     if (heading) heading.closest('.card').scrollIntoView({ behavior: 'smooth', block: 'start' });
   });
+  const dismissBackupBtn = container.querySelector('[data-role="dismiss-backup-nudge"]');
+  if (dismissBackupBtn) {
+    dismissBackupBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      try {
+        await DB.saveSettings({ backupNudgeDismissedAt: new Date().toISOString() });
+        STATE.settings = await DB.getSettings();
+      } catch (err) {
+        console.error('Failed to dismiss backup nudge', err);
+      }
+      const card = dismissBackupBtn.closest('.backup-nudge');
+      if (card) card.remove();
+    });
+  }
   wireSessionRows(container, 'dashboard');
 }
 
@@ -666,8 +857,17 @@ function renderDashboard(container) {
 let saveTimeout = null;
 function scheduleSave() {
   if (saveTimeout) clearTimeout(saveTimeout);
+  setSaveIndicator('pending');
   saveTimeout = setTimeout(async () => {
-    if (STATE.draft) await DB.updateSession(STATE.draft.id, STATE.draft);
+    if (!STATE.draft) return;
+    try {
+      await DB.updateSession(STATE.draft.id, STATE.draft);
+      setSaveIndicator('saved');
+    } catch (err) {
+      console.error('Failed to save workout', err);
+      setSaveIndicator('error');
+      showToast('Could not save your workout — check your device storage.', { type: 'error', duration: 5000 });
+    }
   }, 600);
 }
 
@@ -685,7 +885,7 @@ async function ensureDraft() {
     exerciseId: ex.exerciseId,
     muscleGroup: ex.muscleGroup,
     targetSets: ex.targetSets,
-    sets: Array.from({ length: 2 }, () => ({ weight: '', reps: '', rir: '', tempo: '', notes: '', done: false })),
+    sets: Array.from({ length: 2 }, () => ({ weight: '', reps: '', rir: '', tempo: '', notes: '', done: false, warmup: false })),
     feedback: null
   }));
 
@@ -897,10 +1097,10 @@ function drawLog(container, draft, status) {
       const hasReps = set.reps !== '' && set.reps !== null && set.reps !== undefined;
       const key = `${ei}:${si}`;
       const expanded = expandedNotes.has(key);
-      const hasExtra = (set.tempo && set.tempo !== '') || (set.notes && set.notes !== '');
+      const hasExtra = (set.tempo && set.tempo !== '') || (set.notes && set.notes !== '') || set.warmup;
       return `
-      <div class="set-row">
-        <div class="set-num">${si + 1}</div>
+      <div class="set-row ${set.warmup ? 'is-warmup' : ''}">
+        <div class="set-num">${set.warmup ? 'W' : si + 1}</div>
         <div class="set-field">
           <span class="field-label">${escapeHtml(STATE.settings.units)}</span>
           <input class="cell-input" inputmode="decimal" placeholder="&mdash;" data-entry="${ei}" data-set="${si}" data-field="weight" value="${escapeHtml(set.weight)}">
@@ -914,13 +1114,17 @@ function drawLog(container, draft, status) {
           <input class="cell-input" inputmode="numeric" placeholder="&mdash;" data-entry="${ei}" data-set="${si}" data-field="rir" value="${escapeHtml(set.rir)}">
         </div>
         <button type="button" class="set-check ${set.done ? 'done' : ''}" data-role="toggle-set-done" data-entry="${ei}" data-set="${si}" ${!hasReps ? 'disabled' : ''} aria-label="${set.done ? 'Mark set incomplete' : 'Mark set complete'}">&#10003;</button>
-        <button type="button" class="set-more-btn ${hasExtra ? 'has-content' : ''}" data-role="toggle-notes" data-entry="${ei}" data-set="${si}" aria-label="Tempo and notes">&#8942;</button>
+        <button type="button" class="set-more-btn ${hasExtra ? 'has-content' : ''}" data-role="toggle-notes" data-entry="${ei}" data-set="${si}" aria-label="Tempo, notes, and warm-up">&#8942;</button>
         <div class="set-row-actions"><button type="button" class="ghost small" data-role="remove-set" data-entry="${ei}" data-set="${si}">&times;</button></div>
       </div>
       ${expanded ? `<div class="set-extra-row">
         <input class="cell-input secondary-input" placeholder="tempo" data-entry="${ei}" data-set="${si}" data-field="tempo" value="${escapeHtml(set.tempo)}">
         <input class="cell-input secondary-input" placeholder="notes" data-entry="${ei}" data-set="${si}" data-field="notes" value="${escapeHtml(set.notes)}">
-      </div>` : ''}`;
+      </div>
+      <label class="warmup-toggle">
+        <input type="checkbox" data-role="set-warmup" data-entry="${ei}" data-set="${si}" ${set.warmup ? 'checked' : ''}>
+        Warm-up set (excluded from volume &amp; progression)
+      </label>` : ''}`;
     }).join('');
 
     const feedbackHtml = feedbackSummaryHtml(entry, ei);
@@ -980,7 +1184,7 @@ function drawLog(container, draft, status) {
         <strong>${escapeHtml(draft.dayLabel)}</strong>
         ${draft.isDeload ? '<span class="badge deload" style="margin-left:6px">deload</span>' : ''}
       </div>
-      <span class="small muted">${new Date(draft.date).toLocaleDateString()}</span>
+      <span class="small muted">${new Date(draft.date).toLocaleDateString()} <span class="save-indicator" id="saveIndicatorEl" data-state="idle"></span></span>
     </div>
 
     <div class="log-progress">
@@ -1069,7 +1273,7 @@ function wireLogEvents(container, draft) {
   container.querySelectorAll('[data-role="add-set"]').forEach((btn) => {
     btn.addEventListener('click', () => {
       const ei = parseInt(btn.dataset.entry, 10);
-      draft.entries[ei].sets.push({ weight: '', reps: '', rir: '', tempo: '', notes: '', done: false });
+      draft.entries[ei].sets.push({ weight: '', reps: '', rir: '', tempo: '', notes: '', done: false, warmup: false });
       scheduleSave();
       drawLog(container, draft, mesoStatus(STATE.meso, STATE.sessions));
     });
@@ -1112,6 +1316,16 @@ function wireLogEvents(container, draft) {
     btn.addEventListener('click', () => {
       const key = `${btn.dataset.entry}:${btn.dataset.set}`;
       if (expandedNotes.has(key)) expandedNotes.delete(key); else expandedNotes.add(key);
+      drawLog(container, draft, mesoStatus(STATE.meso, STATE.sessions));
+    });
+  });
+
+  container.querySelectorAll('[data-role="set-warmup"]').forEach((cb) => {
+    cb.addEventListener('change', () => {
+      const ei = parseInt(cb.dataset.entry, 10);
+      const si = parseInt(cb.dataset.set, 10);
+      draft.entries[ei].sets[si].warmup = cb.checked;
+      scheduleSave();
       drawLog(container, draft, mesoStatus(STATE.meso, STATE.sessions));
     });
   });
@@ -1199,7 +1413,7 @@ function wireLogEvents(container, draft) {
       if (!exerciseId) return;
       draft.entries.push({
         exerciseId, muscleGroup, targetSets: 2,
-        sets: Array.from({ length: 2 }, () => ({ weight: '', reps: '', rir: '', tempo: '', notes: '', done: false })),
+        sets: Array.from({ length: 2 }, () => ({ weight: '', reps: '', rir: '', tempo: '', notes: '', done: false, warmup: false })),
         feedback: null
       });
       scheduleSave();
@@ -1209,29 +1423,50 @@ function wireLogEvents(container, draft) {
 
   const finishBtn = container.querySelector('[data-role="finish-workout"]');
   if (finishBtn) {
-    finishBtn.addEventListener('click', async () => {
-      if (!confirm('Finish and save this workout?')) return;
-      draft.completed = true;
-      draft.completedAt = new Date().toISOString();
-      await DB.updateSession(draft.id, draft);
-      STATE.sessions = await DB.getAllSessions();
-      STATE.draft = null;
-      cancelRestTimer();
-      goTo('dashboard');
-      renderRoute();
+    finishBtn.addEventListener('click', () => {
+      openConfirmModal('Finish and save this workout?', {
+        confirmLabel: 'Finish',
+        onConfirm: async () => {
+          draft.completed = true;
+          draft.completedAt = new Date().toISOString();
+          try {
+            await DB.updateSession(draft.id, draft);
+            STATE.sessions = await DB.getAllSessions();
+            STATE.draft = null;
+            cancelRestTimer();
+            goTo('dashboard');
+            renderRoute();
+          } catch (err) {
+            draft.completed = false;
+            draft.completedAt = null;
+            console.error('Failed to finish workout', err);
+            showToast('Could not save — your workout is still in progress. Try again.', { type: 'error', duration: 5000 });
+          }
+        }
+      });
     });
   }
 
   const discardBtn = container.querySelector('[data-role="discard-workout"]');
   if (discardBtn) {
-    discardBtn.addEventListener('click', async () => {
-      if (!confirm('Discard this workout? This cannot be undone.')) return;
-      await DB.deleteSession(draft.id);
-      STATE.sessions = await DB.getAllSessions();
-      STATE.draft = null;
-      cancelRestTimer();
-      goTo('dashboard');
-      renderRoute();
+    discardBtn.addEventListener('click', () => {
+      openConfirmModal('Discard this workout? This cannot be undone.', {
+        danger: true,
+        confirmLabel: 'Discard',
+        onConfirm: async () => {
+          try {
+            await DB.deleteSession(draft.id);
+            STATE.sessions = await DB.getAllSessions();
+            STATE.draft = null;
+            cancelRestTimer();
+            goTo('dashboard');
+            renderRoute();
+          } catch (err) {
+            console.error('Failed to discard workout', err);
+            showToast('Could not discard that workout.', { type: 'error' });
+          }
+        }
+      });
     });
   }
 
@@ -1336,8 +1571,101 @@ function renderProgress(container) {
   drawProgress(container, null);
 }
 
+// One point per session that logged this exercise -- the day's best working
+// set by estimated 1RM (Epley), so a heavier-lower-rep or lighter-higher-rep
+// PR still reads as the day's true signal. Warm-up sets never count.
+function buildExerciseTrendPoints(completedList, exerciseId) {
+  const points = [];
+  completedList.forEach((s) => {
+    const entry = (s.entries || []).find((e) => e.exerciseId === exerciseId);
+    if (!entry) return;
+    let best = null;
+    (entry.sets || []).forEach((set) => {
+      if (set.warmup) return;
+      const rm = estimated1RM(set.weight, set.reps);
+      if (rm !== null && (!best || rm > best.e1rm)) {
+        best = { e1rm: rm, weight: set.weight, reps: set.reps, rir: set.rir };
+      }
+    });
+    if (best) points.push({ date: s.date, e1rm: best.e1rm, weight: best.weight, reps: best.reps, rir: best.rir });
+  });
+  return points.sort((a, b) => (a.date < b.date ? -1 : 1)); // oldest first, left-to-right
+}
+
+// Hand-rolled SVG line chart -- single series (one exercise at a time), so
+// per the dataviz guidance a legend is skippable (the card title names the
+// series) but a hover tooltip + a table-view fallback are not. Returns both
+// the markup and the plotted pixel coordinates so the caller can wire hover.
+function trendChartMarkup(points) {
+  const W = 560, H = 200, padX = 16, padTop = 16, padBottom = 16;
+  const values = points.map((p) => p.e1rm);
+  const minV = Math.min(...values), maxV = Math.max(...values);
+  const range = (maxV - minV) || Math.max(1, maxV * 0.1) || 1;
+  const plotH = H - padTop - padBottom;
+  const stepX = points.length > 1 ? (W - padX * 2) / (points.length - 1) : 0;
+  const coords = points.map((p, i) => ({
+    x: points.length > 1 ? padX + i * stepX : W / 2,
+    y: padTop + plotH - ((p.e1rm - minV) / range) * plotH
+  }));
+  const path = coords.map((c, i) => `${i === 0 ? 'M' : 'L'}${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(' ');
+  const dots = coords.map((c, i) =>
+    `<circle class="trend-dot" cx="${c.x.toFixed(1)}" cy="${c.y.toFixed(1)}" r="4" data-index="${i}"></circle>`
+  ).join('');
+  const firstLabel = new Date(points[0].date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  const lastLabel = new Date(points[points.length - 1].date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+
+  const svg = `
+    <div class="trend-chart-wrap">
+      <div class="trend-chart-plot">
+        <svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" class="trend-chart-svg" data-role="trend-svg">
+          <line x1="${padX}" y1="${padTop + plotH}" x2="${W - padX}" y2="${padTop + plotH}" class="trend-baseline"></line>
+          <text x="${padX}" y="${padTop - 2}" class="trend-axis-label">${Math.round(maxV)}</text>
+          <text x="${padX}" y="${padTop + plotH + 14}" class="trend-axis-label">${Math.round(minV)}</text>
+          <path d="${path}" class="trend-line"></path>
+          ${dots}
+        </svg>
+        <div class="trend-tooltip" data-role="trend-tooltip" style="display:none"></div>
+      </div>
+      <div class="trend-chart-xaxis"><span>${escapeHtml(firstLabel)}</span><span>${points.length > 1 ? escapeHtml(lastLabel) : ''}</span></div>
+    </div>`;
+  return { html: svg, coords, W, H };
+}
+
+function wireTrendChart(container, coords, points, W, H, units) {
+  const svgEl = container.querySelector('[data-role="trend-svg"]');
+  const tooltipEl = container.querySelector('[data-role="trend-tooltip"]');
+  if (!svgEl || !tooltipEl) return;
+
+  const showAt = (i) => {
+    const c = coords[i], p = points[i];
+    tooltipEl.style.display = 'block';
+    tooltipEl.style.left = ((c.x / W) * 100) + '%';
+    tooltipEl.style.top = ((c.y / H) * 100) + '%';
+    tooltipEl.innerHTML = `<strong>${escapeHtml(p.weight)}${escapeHtml(units)} &times; ${escapeHtml(p.reps)}${p.rir !== '' && p.rir !== null && p.rir !== undefined ? ` @ RIR ${escapeHtml(p.rir)}` : ''}</strong><br>${new Date(p.date).toLocaleDateString()} &middot; ~${Math.round(p.e1rm)}${escapeHtml(units)} e1RM`;
+    svgEl.querySelectorAll('.trend-dot').forEach((d) => d.classList.toggle('active', parseInt(d.dataset.index, 10) === i));
+  };
+  const hide = () => {
+    tooltipEl.style.display = 'none';
+    svgEl.querySelectorAll('.trend-dot').forEach((d) => d.classList.remove('active'));
+  };
+  const nearestIndex = (clientX) => {
+    const rect = svgEl.getBoundingClientRect();
+    const relX = rect.width ? ((clientX - rect.left) / rect.width) * W : 0;
+    let nearest = 0, best = Infinity;
+    coords.forEach((c, i) => { const d = Math.abs(c.x - relX); if (d < best) { best = d; nearest = i; } });
+    return nearest;
+  };
+  svgEl.addEventListener('pointermove', (e) => showAt(nearestIndex(e.clientX)));
+  svgEl.addEventListener('pointerdown', (e) => showAt(nearestIndex(e.clientX)));
+  svgEl.addEventListener('pointerleave', hide);
+  svgEl.querySelectorAll('.trend-dot').forEach((dot) => {
+    dot.addEventListener('pointerenter', () => showAt(parseInt(dot.dataset.index, 10)));
+  });
+  if (points.length) showAt(points.length - 1);
+}
+
 function drawProgress(container, selectedExerciseId) {
-  const completed = STATE.sessions.filter((s) => s.completed).sort((a, b) => (a.date < b.date ? 1 : -1));
+  const completed = completedSessions(STATE.sessions).sort((a, b) => (a.date < b.date ? 1 : -1));
 
   const historyRows = completed.slice(0, 25).map(sessionRowHtml).join('');
 
@@ -1351,25 +1679,25 @@ function drawProgress(container, selectedExerciseId) {
     })
   ).join('');
 
-  let trendHtml = '<p class="muted small">Pick an exercise to see your recent weight/reps/RIR history.</p>';
+  let chartHtml = '<p class="muted small">Pick an exercise to see your estimated 1RM trend over time.</p>';
+  let chartData = null;
+  let trendPoints = [];
   if (selectedExerciseId) {
-    const points = [];
-    completed.forEach((s) => {
-      const entry = (s.entries || []).find((e) => e.exerciseId === selectedExerciseId);
-      if (!entry) return;
-      const workingSets = (entry.sets || []).filter((set) => set.reps !== '' && set.reps !== null);
-      if (workingSets.length === 0) return;
-      const topSet = workingSets.reduce((best, cur) => (parseFloat(cur.weight) || 0) > (parseFloat(best.weight) || 0) ? cur : best, workingSets[0]);
-      points.push({ date: s.date, weight: topSet.weight, reps: topSet.reps, rir: topSet.rir });
-    });
-    const rows = points.slice(0, 12).map((p) => `<div class="list-row">
-      <span class="secondary">${new Date(p.date).toLocaleDateString()}</span>
-      <span class="trailing num">${escapeHtml(p.weight)}${escapeHtml(STATE.settings.units)} &times; ${escapeHtml(p.reps)} @ RIR ${escapeHtml(p.rir)}</span>
-    </div>`).join('');
-    trendHtml = points.length
-      ? rows
-      : '<p class="empty-state">No logged sets yet for this exercise.</p>';
+    trendPoints = buildExerciseTrendPoints(completed, selectedExerciseId);
+    if (trendPoints.length >= 2) {
+      chartData = trendChartMarkup(trendPoints);
+      chartHtml = `<p class="small muted" style="margin:0 0 8px">Estimated 1-rep max (Epley formula), most recent working set each session</p>${chartData.html}`;
+    } else if (trendPoints.length === 1) {
+      chartHtml = '<p class="empty-state">Log this exercise once more to start seeing a trend.</p>';
+    } else {
+      chartHtml = '<p class="empty-state">No logged working sets yet for this exercise.</p>';
+    }
   }
+
+  const tableRows = trendPoints.slice().reverse().slice(0, 12).map((p) => `<div class="list-row">
+      <span class="secondary">${new Date(p.date).toLocaleDateString()}</span>
+      <span class="trailing num">${escapeHtml(p.weight)}${escapeHtml(STATE.settings.units)} &times; ${escapeHtml(p.reps)}${p.rir !== '' && p.rir !== null && p.rir !== undefined ? ` @ RIR ${escapeHtml(p.rir)}` : ''}</span>
+    </div>`).join('');
 
   const body = `
     <div class="card">
@@ -1379,13 +1707,15 @@ function drawProgress(container, selectedExerciseId) {
     <div class="card">
       <h2>Exercise Trend</h2>
       <select id="progressExerciseSelect">${exerciseSelectOptions}</select>
-      <div style="margin-top:8px">${trendHtml}</div>
+      <div style="margin-top:10px">${chartHtml}</div>
+      ${trendPoints.length ? `<div style="margin-top:14px;padding-top:10px;border-top:1px solid var(--border)"><p class="small muted" style="margin:0 0 4px">Logged sessions (table view)</p>${tableRows}</div>` : ''}
     </div>
   `;
 
   container.innerHTML = appShell(body, 'progress', 'Progress', `${completed.length} workouts logged`);
   const sel = container.querySelector('#progressExerciseSelect');
   sel.addEventListener('change', () => drawProgress(container, sel.value || null));
+  if (chartData) wireTrendChart(container, chartData.coords, trendPoints, chartData.W, chartData.H, STATE.settings.units);
   wireSessionRows(container, 'progress');
 }
 
@@ -1412,11 +1742,12 @@ async function renderSessionDetail(container, idParam) {
     const setRows = (entry.sets || []).map((set, si) => {
       const logged = set.reps !== '' && set.reps !== null && set.reps !== undefined;
       if (!logged) return '';
-      const pr = isPRSet(STATE.sessions, session, entry.exerciseId, set.weight);
+      const pr = !set.warmup && isPRSet(STATE.sessions, session, entry.exerciseId, set.weight, set.reps);
       return `<div class="detail-set-row">
         <span class="detail-set-num">${si + 1}</span>
         <span class="detail-set-vals">${escapeHtml(set.weight)}${escapeHtml(units)} &times; ${escapeHtml(set.reps)}${set.rir !== '' && set.rir !== null && set.rir !== undefined ? ` @ RIR ${escapeHtml(set.rir)}` : ''}</span>
         ${pr ? '<span class="pr-badge">PR</span>' : ''}
+        ${set.warmup ? '<span class="tag">Warm-up</span>' : ''}
         ${set.tempo ? `<span class="tag">${escapeHtml(set.tempo)}</span>` : ''}
       </div>${set.notes ? `<div class="detail-set-note">${escapeHtml(set.notes)}</div>` : ''}`;
     }).join('');
@@ -1465,12 +1796,45 @@ async function renderSessionDetail(container, idParam) {
   if (delBtn) delBtn.addEventListener('click', () => deleteSessionFlow(session.id, 'progress'));
 }
 
+// Minimal static sparkline (no hover interaction, unlike the exercise trend
+// chart) -- body weight is a lighter-weight, glance-only metric.
+function bodyweightSparklineHtml(points, units) {
+  if (points.length < 2) return '<p class="bw-sparkline-empty">Log your weight at least twice to see a trend.</p>';
+  const W = 560, H = 90, padX = 12, padY = 14;
+  const values = points.map((p) => p.weight);
+  const minV = Math.min(...values), maxV = Math.max(...values);
+  const range = (maxV - minV) || Math.max(1, maxV * 0.05) || 1;
+  const plotH = H - padY * 2;
+  const stepX = (W - padX * 2) / (points.length - 1);
+  const coords = points.map((p, i) => ({
+    x: padX + i * stepX,
+    y: padY + plotH - ((p.weight - minV) / range) * plotH
+  }));
+  const path = coords.map((c, i) => `${i === 0 ? 'M' : 'L'}${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(' ');
+  const dots = coords.map((c) => `<circle class="trend-dot" cx="${c.x.toFixed(1)}" cy="${c.y.toFixed(1)}" r="3"></circle>`).join('');
+  return `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" class="trend-chart-svg bw-sparkline">
+    <text x="${padX}" y="${padY - 3}" class="trend-axis-label">${maxV}${escapeHtml(units)}</text>
+    <text x="${padX}" y="${padY + plotH + 12}" class="trend-axis-label">${minV}${escapeHtml(units)}</text>
+    <path d="${path}" class="trend-line"></path>
+    ${dots}
+  </svg>`;
+}
+
 // ---------------------------------------------------------------------------
 // Settings
 // ---------------------------------------------------------------------------
 function renderSettings(container) {
   const s = STATE.settings;
   const currentTheme = s.theme || 'dark';
+  const bwLog = (s.bodyweightLog || []).slice().sort((a, b) => (a.date < b.date ? -1 : 1));
+  const bwRecentRows = bwLog.slice().reverse().slice(0, 5).map((e) => `<div class="list-row">
+      <span class="secondary">${new Date(e.date + 'T00:00:00').toLocaleDateString()}</span>
+      <div class="row" style="gap:8px">
+        <span class="trailing num">${e.weight}${escapeHtml(s.units)}</span>
+        <button type="button" class="ghost small" data-role="delete-bw-entry" data-date="${escapeHtml(e.date)}">&times;</button>
+      </div>
+    </div>`).join('');
+  const todayIso = new Date().toISOString().slice(0, 10);
   const body = `
     <div class="card">
       <h2>Appearance</h2>
@@ -1561,6 +1925,17 @@ function renderSettings(container) {
     </div>
 
     <div class="card">
+      <h2>Body Weight</h2>
+      <div class="bodyweight-row">
+        <div class="field"><label>Date</label><input type="date" id="bwDate" value="${todayIso}"></div>
+        <div class="field"><label>Weight (${escapeHtml(s.units)})</label><input type="number" id="bwWeight" step="0.1" min="0" inputmode="decimal"></div>
+      </div>
+      <button type="button" class="secondary block" id="bwLogBtn">Log Weight</button>
+      <div class="bw-sparkline">${bodyweightSparklineHtml(bwLog, s.units)}</div>
+      ${bwRecentRows}
+    </div>
+
+    <div class="card">
       <h2>Backup</h2>
       <p class="small muted">Your data lives in this browser only. Export a backup occasionally in case Chrome ever clears its storage.</p>
       <button class="block secondary" id="exportBtn">Export Backup (.json)</button>
@@ -1583,8 +1958,13 @@ function renderSettings(container) {
       const value = btn.dataset.themeValue;
       container.querySelectorAll('#themeToggle .theme-toggle-btn').forEach(b => b.classList.toggle('active', b === btn));
       applyTheme(value);
-      await DB.saveSettings({ theme: value });
-      STATE.settings = await DB.getSettings();
+      try {
+        await DB.saveSettings({ theme: value });
+        STATE.settings = await DB.getSettings();
+      } catch (err) {
+        console.error('Failed to save theme', err);
+        showToast('Could not save theme preference.', { type: 'error' });
+      }
     });
   });
 
@@ -1592,9 +1972,14 @@ function renderSettings(container) {
     btn.addEventListener('click', async () => {
       const goal = btn.dataset.goalValue;
       const preset = GOAL_PRESETS[goal] || GOAL_PRESETS.hypertrophy;
-      await DB.saveSettings({ goal, targetRIR: preset.targetRIR, repRangeMin: preset.repRangeMin, repRangeMax: preset.repRangeMax });
-      STATE.settings = await DB.getSettings();
-      renderSettings(container);
+      try {
+        await DB.saveSettings({ goal, targetRIR: preset.targetRIR, repRangeMin: preset.repRangeMin, repRangeMax: preset.repRangeMax });
+        STATE.settings = await DB.getSettings();
+        renderSettings(container);
+      } catch (err) {
+        console.error('Failed to save goal', err);
+        showToast('Could not save training goal.', { type: 'error' });
+      }
     });
   });
 
@@ -1603,24 +1988,39 @@ function renderSettings(container) {
     addCustomExerciseBtn.addEventListener('click', async () => {
       const nameInput = container.querySelector('#newExName');
       const name = nameInput.value.trim();
-      if (!name) { alert('Give the exercise a name.'); return; }
+      if (!name) { openMessageModal('Give the exercise a name.'); return; }
       const muscleGroup = container.querySelector('#newExMuscle').value;
       const equipment = container.querySelector('#newExEquipment').value;
       const compound = container.querySelector('#newExCompound').checked;
       const id = 'custom-' + muscleGroup + '-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
       const exercise = { id, name, muscleGroup, equipment, compound };
-      await DB.addCustomExercise(exercise);
-      STATE.customExercises = await DB.getAllCustomExercises();
-      renderSettings(container);
+      try {
+        await DB.addCustomExercise(exercise);
+        STATE.customExercises = await DB.getAllCustomExercises();
+        renderSettings(container);
+      } catch (err) {
+        console.error('Failed to add exercise', err);
+        showToast('Could not save that exercise.', { type: 'error' });
+      }
     });
   }
 
   container.querySelectorAll('[data-role="delete-custom-exercise"]').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      if (!confirm('Delete this custom exercise? Past logged sets that used it are kept, but you will not be able to pick it again.')) return;
-      await DB.deleteCustomExercise(btn.dataset.id);
-      STATE.customExercises = await DB.getAllCustomExercises();
-      renderSettings(container);
+    btn.addEventListener('click', () => {
+      openConfirmModal('Delete this custom exercise? Past logged sets that used it are kept, but you will not be able to pick it again.', {
+        danger: true,
+        confirmLabel: 'Delete',
+        onConfirm: async () => {
+          try {
+            await DB.deleteCustomExercise(btn.dataset.id);
+            STATE.customExercises = await DB.getAllCustomExercises();
+            renderSettings(container);
+          } catch (err) {
+            console.error('Failed to delete exercise', err);
+            showToast('Could not delete that exercise.', { type: 'error' });
+          }
+        }
+      });
     });
   });
 
@@ -1630,52 +2030,127 @@ function renderSettings(container) {
     const repRangeMin = parseInt(container.querySelector('#setRepMin').value, 10) || 8;
     const repRangeMax = parseInt(container.querySelector('#setRepMax').value, 10) || 12;
     const restTimerSeconds = parseInt(container.querySelector('#setRestTimer').value, 10) || 105;
-    await DB.saveSettings({ units, targetRIR, repRangeMin, repRangeMax, restTimerSeconds });
-    STATE.settings = await DB.getSettings();
-    TIMER.remaining = STATE.settings.restTimerSeconds;
-    TIMER.total = TIMER.remaining;
-    alert('Preferences saved.');
-    renderSettings(container);
+    try {
+      await DB.saveSettings({ units, targetRIR, repRangeMin, repRangeMax, restTimerSeconds });
+      STATE.settings = await DB.getSettings();
+      TIMER.remaining = STATE.settings.restTimerSeconds;
+      TIMER.total = TIMER.remaining;
+      showToast('Preferences saved.', { type: 'success' });
+      renderSettings(container);
+    } catch (err) {
+      console.error('Failed to save preferences', err);
+      showToast('Could not save preferences.', { type: 'error' });
+    }
+  });
+
+  const bwLogBtn = container.querySelector('#bwLogBtn');
+  if (bwLogBtn) {
+    bwLogBtn.addEventListener('click', async () => {
+      const dateVal = container.querySelector('#bwDate').value;
+      const weightVal = parseFloat(container.querySelector('#bwWeight').value);
+      if (!dateVal || !isFinite(weightVal) || weightVal <= 0) { openMessageModal('Enter a valid date and weight.'); return; }
+      const log = (STATE.settings.bodyweightLog || []).filter((e) => e.date !== dateVal);
+      log.push({ date: dateVal, weight: weightVal });
+      log.sort((a, b) => (a.date < b.date ? -1 : 1));
+      try {
+        await DB.saveSettings({ bodyweightLog: log });
+        STATE.settings = await DB.getSettings();
+        renderSettings(container);
+      } catch (err) {
+        console.error('Failed to log body weight', err);
+        showToast('Could not save that entry.', { type: 'error' });
+      }
+    });
+  }
+
+  container.querySelectorAll('[data-role="delete-bw-entry"]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      openConfirmModal('Delete this weight entry?', {
+        danger: true,
+        confirmLabel: 'Delete',
+        onConfirm: async () => {
+          const log = (STATE.settings.bodyweightLog || []).filter((e) => e.date !== btn.dataset.date);
+          try {
+            await DB.saveSettings({ bodyweightLog: log });
+            STATE.settings = await DB.getSettings();
+            renderSettings(container);
+          } catch (err) {
+            console.error('Failed to delete body weight entry', err);
+            showToast('Could not delete that entry.', { type: 'error' });
+          }
+        }
+      });
+    });
   });
 
   container.querySelector('#exportBtn').addEventListener('click', async () => {
-    const data = await DB.exportAll();
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `hypertrack-backup-${new Date().toISOString().slice(0, 10)}.json`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    try {
+      const data = await DB.exportAll();
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `hypertrack-backup-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      await DB.saveSettings({ lastExportAt: new Date().toISOString() });
+      STATE.settings = await DB.getSettings();
+      showToast('Backup exported.', { type: 'success' });
+    } catch (err) {
+      console.error('Failed to export backup', err);
+      showToast('Could not export a backup.', { type: 'error' });
+    }
   });
 
   container.querySelector('#importFile').addEventListener('change', async (e) => {
     const file = e.target.files[0];
     if (!file) return;
+    let data;
     try {
       const text = await file.text();
-      const data = JSON.parse(text);
-      if (!confirm('This will replace all current data with the backup file. Continue?')) return;
-      await DB.importAll(data);
-      STATE.settings = await DB.getSettings();
-      STATE.meso = await DB.getActiveMesocycle();
-      STATE.sessions = await DB.getAllSessions();
-      STATE.customExercises = await DB.getAllCustomExercises();
-      STATE.draft = null;
-      alert('Backup imported.');
-      goTo('dashboard');
-      renderRoute();
+      data = JSON.parse(text);
     } catch (err) {
-      alert('Could not import that file: ' + err.message);
+      openMessageModal('Could not read that file: ' + err.message);
+      return;
     }
+    openConfirmModal('This will replace all current data with the backup file. Continue?', {
+      danger: true,
+      confirmLabel: 'Import',
+      onConfirm: async () => {
+        try {
+          await DB.importAll(data);
+          STATE.settings = await DB.getSettings();
+          STATE.meso = await DB.getActiveMesocycle();
+          STATE.sessions = await DB.getAllSessions();
+          STATE.customExercises = await DB.getAllCustomExercises();
+          STATE.draft = null;
+          openMessageModal('Backup imported.', { onClose: () => { goTo('dashboard'); renderRoute(); } });
+        } catch (err) {
+          console.error('Failed to import backup', err);
+          openMessageModal('Could not import that file: ' + err.message);
+        }
+      }
+    });
   });
 
-  container.querySelector('#resetBtn').addEventListener('click', async () => {
-    if (!confirm('This deletes ALL workouts, mesocycles, and settings on this device. This cannot be undone. Continue?')) return;
-    if (!confirm('Really sure? Consider exporting a backup first.')) return;
-    indexedDB.deleteDatabase(DB_NAME);
-    location.reload();
+  container.querySelector('#resetBtn').addEventListener('click', () => {
+    openConfirmModal('This deletes ALL workouts, mesocycles, and settings on this device. This cannot be undone. Continue?', {
+      danger: true,
+      confirmLabel: 'Continue',
+      onConfirm: () => {
+        openConfirmModal('Really sure? Consider exporting a backup first.', {
+          danger: true,
+          confirmLabel: 'Delete Everything',
+          onConfirm: () => {
+            const req = indexedDB.deleteDatabase(DB_NAME);
+            req.onsuccess = () => location.reload();
+            req.onblocked = () => location.reload();
+            req.onerror = () => showToast('Could not reset data.', { type: 'error' });
+          }
+        });
+      }
+    });
   });
 }

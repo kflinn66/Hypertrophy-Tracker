@@ -79,16 +79,6 @@ const DB = {
     const db = await openDB();
     return promisify(tx(db, 'sessions', 'readonly').getAll());
   },
-  async getSessionsForMeso(mesoId) {
-    const all = await this.getAllSessions();
-    return all.filter(s => s.mesoId === mesoId);
-  },
-  // sets logged in the trailing N days, used for weekly volume dashboard
-  async getSessionsSince(isoDate) {
-    const all = await this.getAllSessions();
-    return all.filter(s => s.date >= isoDate);
-  },
-
   // ---------------- mesocycles ----------------
   async addMesocycle(meso) {
     const db = await openDB();
