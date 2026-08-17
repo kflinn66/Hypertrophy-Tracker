@@ -18,7 +18,7 @@ const VOLUME_LANDMARKS = {
   hamstrings:   { label: 'Hamstrings',       mev: 6,  mavLow: 10, mavHigh: 16, mrv: 20 },
   glutes:       { label: 'Glutes',           mev: 4,  mavLow: 8,  mavHigh: 12, mrv: 16 },
   calves:       { label: 'Calves',           mev: 8,  mavLow: 12, mavHigh: 16, mrv: 20 },
-  abs:          { label: 'Abs',              mev: 0,  mavLow: 16, mavHigh: 20, mrv: 25 }
+  abs:          { label: 'Abs',              mev: 4,  mavLow: 16, mavHigh: 20, mrv: 25 }
 };
 
 // Returns 'under' | 'mev' | 'mav' | 'mrv' | 'over' for color-coding a weekly total.
