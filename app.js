@@ -258,6 +258,7 @@ function renderOnboarding(container, opts) {
       days: STATE.meso && STATE.meso.splitKey !== 'custom' ? STATE.meso.daysPerWeek : 4,
       units: STATE.settings ? STATE.settings.units || 'lbs' : 'lbs',
       goal: STATE.settings ? STATE.settings.goal || 'hypertrophy' : 'hypertrophy',
+      priorityMuscles: STATE.settings && Array.isArray(STATE.settings.priorityMuscles) ? STATE.settings.priorityMuscles.slice() : [],
       trainingWeeks: STATE.meso ? STATE.meso.trainingWeeks : 4,
       customDays: [{ dayLabel: 'Day 1', exercises: [], addMuscle: MUSCLE_GROUP_ORDER[0] }]
     };
@@ -358,6 +359,19 @@ function drawOnboarding(container, opts) {
       <p class="small muted" style="margin-top:8px">Sets the default rep range and target RIR used for progression suggestions. You can fine-tune these later in Settings.</p>
     </div>`;
 
+  const priorityMuscles = onboardingDraft.priorityMuscles || [];
+  const priorityCells = MUSCLE_GROUP_ORDER.map((m) => {
+    const active = priorityMuscles.includes(m);
+    return `<button type="button" class="priority-chip ${active ? 'active' : ''}" data-role="pick-priority" data-muscle="${m}">${escapeHtml(VOLUME_LANDMARKS[m].label)}</button>`;
+  }).join('');
+
+  const prioritySection = `
+    <div class="card">
+      <h2>${num()}. Your Priorities <span class="muted" style="text-transform:none;letter-spacing:0;font-weight:400">(optional)</span></h2>
+      <p class="small muted" style="margin-top:-6px">Pick up to 3 muscle groups you most want to grow or strengthen. We'll give them extra weekly volume and train them first each session, while it's still fresh.</p>
+      <div class="priority-grid">${priorityCells}</div>
+    </div>`;
+
   const unitsSection = `
     <div class="card">
       <h2>${num()}. Units</h2>
@@ -384,6 +398,7 @@ function drawOnboarding(container, opts) {
     ${trainingStyleSection}
     ${splitSection}
     ${goalSection}
+    ${prioritySection}
     ${unitsSection}
     ${mesoSection}
     <button class="block" data-role="confirm-onboarding">${opts.isChange ? 'Start New Mesocycle' : 'Create My Plan'}</button>
@@ -409,6 +424,20 @@ function drawOnboarding(container, opts) {
   });
   container.querySelectorAll('[data-role="pick-goal"]').forEach((el) => {
     el.addEventListener('click', () => { onboardingDraft.goal = el.dataset.goal; drawOnboarding(container, opts); });
+  });
+  container.querySelectorAll('[data-role="pick-priority"]').forEach((el) => {
+    el.addEventListener('click', () => {
+      const m = el.dataset.muscle;
+      const list = onboardingDraft.priorityMuscles || (onboardingDraft.priorityMuscles = []);
+      const idx = list.indexOf(m);
+      if (idx >= 0) {
+        list.splice(idx, 1);
+      } else {
+        if (list.length >= 3) { alert('Pick up to 3 priority muscle groups for the biggest effect.'); return; }
+        list.push(m);
+      }
+      drawOnboarding(container, opts);
+    });
   });
   container.querySelectorAll('[data-role="pick-units"]').forEach((el) => {
     el.addEventListener('click', () => { onboardingDraft.units = el.dataset.units; drawOnboarding(container, opts); });
@@ -482,13 +511,13 @@ async function completeOnboarding() {
       if (!d.exercises || d.exercises.length === 0) { alert(`Add at least one exercise to "${d.dayLabel}".`); return; }
     }
     try {
-      plan = buildCustomPlan(draft.customDays.map((d) => ({ dayLabel: d.dayLabel || 'Day', exercises: d.exercises })));
+      plan = buildCustomPlan(draft.customDays.map((d) => ({ dayLabel: d.dayLabel || 'Day', exercises: d.exercises })), draft.priorityMuscles || []);
     } catch (err) {
       alert(err.message);
       return;
     }
   } else {
-    plan = buildPlan(draft.splitKey, draft.days);
+    plan = buildPlan(draft.splitKey, draft.days, draft.priorityMuscles || []);
   }
 
   if (STATE.meso) {
@@ -513,6 +542,7 @@ async function completeOnboarding() {
     onboarded: true,
     units: draft.units,
     goal: draft.goal,
+    priorityMuscles: draft.priorityMuscles || [],
     targetRIR: goalPreset.targetRIR,
     repRangeMin: goalPreset.repRangeMin,
     repRangeMax: goalPreset.repRangeMax,
@@ -655,7 +685,7 @@ async function ensureDraft() {
     exerciseId: ex.exerciseId,
     muscleGroup: ex.muscleGroup,
     targetSets: ex.targetSets,
-    sets: Array.from({ length: 2 }, () => ({ weight: '', reps: '', rir: '', tempo: '', notes: '' })),
+    sets: Array.from({ length: 2 }, () => ({ weight: '', reps: '', rir: '', tempo: '', notes: '', done: false })),
     feedback: null
   }));
 
@@ -704,8 +734,12 @@ function exerciseOptionsHtml(muscleGroup, selectedId) {
 let expandedNotes = new Set();
 let expandedNotesDraftId = null;
 
+// An exercise counts as "done" only once every set has been explicitly
+// marked complete by the lifter (the checkmark button) -- never just because
+// a field has a value in it. Autofill can prefill weight/reps for the next
+// set, but it must never flip this on by itself.
 function isEntryDone(entry) {
-  return entry.sets.length > 0 && entry.sets.every((s) => s.reps !== '' && s.reps !== null && s.reps !== undefined);
+  return entry.sets.length > 0 && entry.sets.every((s) => !!s.done);
 }
 
 const PAIN_CHIPS = [
@@ -731,13 +765,53 @@ function chipRowHtml(role, entryIndex, groupName, chips, current, disabled) {
     `</div>`;
 }
 
-// The post-exercise check-in (pain + felt-like chips), only shown once every
-// set on this exercise has reps logged. Factored out so it can be injected
-// live via refreshLogDynamicSections() the instant an exercise becomes done,
-// without a full-screen redraw that would steal focus mid-typing.
-function checkinSectionHtml(entry, ei) {
-  return `
-    <div class="exercise-checkin">
+const PAIN_CHIP_LABELS = Object.fromEntries(PAIN_CHIPS.map((c) => [c.value, c.label]));
+const DIFFICULTY_CHIP_LABELS = Object.fromEntries(DIFFICULTY_CHIPS.map((c) => [c.value, c.label]));
+const VOLUME_CHIP_LABELS = Object.fromEntries(VOLUME_CHIPS.map((c) => [c.value, c.label]));
+
+// Compact, tappable summary of a completed check-in shown on the exercise
+// card afterward -- empty until the popup has been answered at least once.
+function feedbackSummaryHtml(entry, ei) {
+  if (!entry.feedback || (!entry.feedback.pain && !entry.feedback.difficulty)) return '';
+  const parts = [];
+  if (entry.feedback.pain) parts.push(`Pain: ${PAIN_CHIP_LABELS[entry.feedback.pain]}`);
+  if (entry.feedback.difficulty) parts.push(`Felt: ${DIFFICULTY_CHIP_LABELS[entry.feedback.difficulty]}`);
+  return `<button type="button" class="feedback-summary" data-role="edit-checkin" data-entry="${ei}">${escapeHtml(parts.join(' · '))} <span class="edit-hint">Edit</span></button>`;
+}
+
+function closeAnyModal() {
+  const existing = document.querySelector('.modal-overlay');
+  if (existing) existing.remove();
+}
+
+// Wires a single chip-row's buttons for use INSIDE a modal: toggles the
+// active class in place (the modal itself never re-renders while open) and
+// hands the chosen value back to the caller to persist.
+function wireModalChipRow(rowEl, onSelect) {
+  if (!rowEl) return;
+  rowEl.querySelectorAll('button.chip').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      rowEl.querySelectorAll('button.chip').forEach((b) => b.classList.toggle('active', b === btn));
+      onSelect(btn.dataset.value);
+    });
+  });
+}
+
+// Popup shown the instant the FINAL set of an exercise is marked complete
+// (never before). Answers save live as chips are tapped; closing via Done,
+// the X, or the backdrop is the only way out. onClose can chain straight
+// into the muscle-group popup when this was also that muscle's last exercise.
+function openExerciseCheckinModal(draft, ei, container, onClose) {
+  closeAnyModal();
+  const entry = draft.entries[ei];
+  const ex = exerciseById(entry.exerciseId);
+  const modal = document.createElement('div');
+  modal.className = 'modal-overlay';
+  modal.innerHTML = `
+    <div class="modal-card">
+      <button type="button" class="modal-close" data-role="modal-close" aria-label="Close">&times;</button>
+      <h2>${escapeHtml(ex ? ex.name : 'Exercise')} done</h2>
+      <p class="muted small">How did that feel?</p>
       <div class="checkin-row">
         <span class="checkin-label">Pain?</span>
         ${chipRowHtml('pain-chip', ei, 'pain', PAIN_CHIPS, entry.feedback ? entry.feedback.pain : null, false)}
@@ -746,83 +820,63 @@ function checkinSectionHtml(entry, ei) {
         <span class="checkin-label">Felt?</span>
         ${chipRowHtml('diff-chip', ei, 'diff', DIFFICULTY_CHIPS, entry.feedback ? entry.feedback.difficulty : null, false)}
       </div>
+      <button type="button" class="block" data-role="modal-done" style="margin-top:6px">Done</button>
     </div>`;
+  document.body.appendChild(modal);
+
+  wireModalChipRow(modal.querySelector('[data-role="pain-chip-row"]'), (value) => {
+    entry.feedback = entry.feedback || { pain: null, difficulty: null };
+    entry.feedback.pain = value;
+    scheduleSave();
+  });
+  wireModalChipRow(modal.querySelector('[data-role="diff-chip-row"]'), (value) => {
+    entry.feedback = entry.feedback || { pain: null, difficulty: null };
+    entry.feedback.difficulty = value;
+    scheduleSave();
+  });
+
+  const finish = () => {
+    modal.remove();
+    drawLog(container, draft, mesoStatus(STATE.meso, STATE.sessions));
+    if (onClose) onClose();
+  };
+  modal.querySelector('[data-role="modal-close"]').addEventListener('click', finish);
+  modal.querySelector('[data-role="modal-done"]').addEventListener('click', finish);
+  modal.addEventListener('click', (e) => { if (e.target === modal) finish(); });
 }
 
-// Live, focus-safe update of the parts of the Log screen that depend on
-// "is this exercise/muscle group done yet" -- called on every reps keystroke.
-// Only touches the progress bar, per-card done state/checkmark, and the
-// check-in sections themselves; never re-renders the inputs the lifter is
-// actively typing into.
-function refreshLogDynamicSections(container, draft) {
-  const doneCount = draft.entries.filter(isEntryDone).length;
-  const fill = container.querySelector('.log-progress-fill');
-  const label = container.querySelector('.log-progress-label');
-  if (fill) fill.style.width = (draft.entries.length ? Math.round((doneCount / draft.entries.length) * 100) : 0) + '%';
-  if (label) label.textContent = `${doneCount}/${draft.entries.length} exercises logged`;
+// Popup shown the instant the LAST exercise for a muscle group is marked
+// complete. Also reachable afterward from the Muscle Group Check-In summary
+// row to review or change the answer.
+function openMuscleCheckinModal(draft, muscleGroup, container, onClose) {
+  closeAnyModal();
+  const current = draft.muscleFeedback ? draft.muscleFeedback[muscleGroup] : null;
+  const modal = document.createElement('div');
+  modal.className = 'modal-overlay';
+  modal.innerHTML = `
+    <div class="modal-card">
+      <button type="button" class="modal-close" data-role="modal-close" aria-label="Close">&times;</button>
+      <h2>${escapeHtml(VOLUME_LANDMARKS[muscleGroup].label)} volume</h2>
+      <p class="muted small">How did overall volume feel today?</p>
+      ${chipRowHtml('muscle-chip', null, muscleGroup, VOLUME_CHIPS, current, false)}
+      <button type="button" class="block" data-role="modal-done" style="margin-top:14px">Done</button>
+    </div>`;
+  document.body.appendChild(modal);
 
-  const cards = container.querySelectorAll('.ex-card');
-  draft.entries.forEach((entry, ei) => {
-    const card = cards[ei];
-    if (!card) return;
-    const done = isEntryDone(entry);
-    card.classList.toggle('ex-done', done);
-    const nameEl = card.querySelector('.ex-head .name');
-    if (nameEl) {
-      const hasCheck = !!nameEl.querySelector('.ex-done-check');
-      if (done && !hasCheck) nameEl.insertAdjacentHTML('afterbegin', '<span class="ex-done-check">&#10003;</span> ');
-      if (!done && hasCheck) { const c = nameEl.querySelector('.ex-done-check'); if (c) c.remove(); }
-    }
-    let checkin = card.querySelector('.exercise-checkin');
-    if (done && !checkin) {
-      card.insertAdjacentHTML('beforeend', checkinSectionHtml(entry, ei));
-      wireCheckinChips(card.querySelector('.exercise-checkin'), draft, container);
-    } else if (!done && checkin) {
-      checkin.remove();
-    }
+  wireModalChipRow(modal.querySelector('[data-role="muscle-chip-row"]'), (value) => {
+    draft.muscleFeedback = draft.muscleFeedback || {};
+    draft.muscleFeedback[muscleGroup] = value;
+    scheduleSave();
   });
 
-  const muscleOrder = [];
-  draft.entries.forEach((e) => { if (!muscleOrder.includes(e.muscleGroup)) muscleOrder.push(e.muscleGroup); });
-  const muscleRows = container.querySelectorAll('.muscle-checkin-row');
-  muscleOrder.forEach((m, mi) => {
-    const row = muscleRows[mi];
-    if (!row) return;
-    const entriesForMuscle = draft.entries.filter((e) => e.muscleGroup === m);
-    const allDone = entriesForMuscle.every(isEntryDone);
-    row.querySelectorAll('[data-role="muscle-chip"]').forEach((btn) => { btn.disabled = !allDone; });
-    const hint = row.querySelector('.muscle-checkin-label .muted');
-    if (allDone && hint) hint.remove();
-    else if (!allDone && !hint) {
-      const labelEl = row.querySelector('.muscle-checkin-label');
-      if (labelEl) labelEl.insertAdjacentHTML('beforeend', ' <span class="muted small">(finish all exercises first)</span>');
-    }
-  });
-}
-
-// Attaches pain/difficulty chip click handlers within a scope -- used both
-// for the initial render and for check-in sections injected live later.
-function wireCheckinChips(scopeEl, draft, container) {
-  scopeEl.querySelectorAll('[data-role="pain-chip"]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const ei = parseInt(btn.dataset.entry, 10);
-      const entry = draft.entries[ei];
-      entry.feedback = entry.feedback || { pain: null, difficulty: null };
-      entry.feedback.pain = btn.dataset.value;
-      scheduleSave();
-      drawLog(container, draft, mesoStatus(STATE.meso, STATE.sessions));
-    });
-  });
-  scopeEl.querySelectorAll('[data-role="diff-chip"]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const ei = parseInt(btn.dataset.entry, 10);
-      const entry = draft.entries[ei];
-      entry.feedback = entry.feedback || { pain: null, difficulty: null };
-      entry.feedback.difficulty = btn.dataset.value;
-      scheduleSave();
-      drawLog(container, draft, mesoStatus(STATE.meso, STATE.sessions));
-    });
-  });
+  const finish = () => {
+    modal.remove();
+    drawLog(container, draft, mesoStatus(STATE.meso, STATE.sessions));
+    if (onClose) onClose();
+  };
+  modal.querySelector('[data-role="modal-close"]').addEventListener('click', finish);
+  modal.querySelector('[data-role="modal-done"]').addEventListener('click', finish);
+  modal.addEventListener('click', (e) => { if (e.target === modal) finish(); });
 }
 
 function drawLog(container, draft, status) {
@@ -840,7 +894,7 @@ function drawLog(container, draft, status) {
     const signalIcon = suggestion.signal === 'up' ? '&#9650;' : suggestion.signal === 'down' ? '&#9660;' : '&#9679;';
 
     const setsRows = entry.sets.map((set, si) => {
-      const done = set.reps !== '' && set.reps !== null && set.reps !== undefined;
+      const hasReps = set.reps !== '' && set.reps !== null && set.reps !== undefined;
       const key = `${ei}:${si}`;
       const expanded = expandedNotes.has(key);
       const hasExtra = (set.tempo && set.tempo !== '') || (set.notes && set.notes !== '');
@@ -859,7 +913,7 @@ function drawLog(container, draft, status) {
           <span class="field-label">RIR</span>
           <input class="cell-input" inputmode="numeric" placeholder="&mdash;" data-entry="${ei}" data-set="${si}" data-field="rir" value="${escapeHtml(set.rir)}">
         </div>
-        <div class="set-check ${done ? 'done' : ''}">&#10003;</div>
+        <button type="button" class="set-check ${set.done ? 'done' : ''}" data-role="toggle-set-done" data-entry="${ei}" data-set="${si}" ${!hasReps ? 'disabled' : ''} aria-label="${set.done ? 'Mark set incomplete' : 'Mark set complete'}">&#10003;</button>
         <button type="button" class="set-more-btn ${hasExtra ? 'has-content' : ''}" data-role="toggle-notes" data-entry="${ei}" data-set="${si}" aria-label="Tempo and notes">&#8942;</button>
         <div class="set-row-actions"><button type="button" class="ghost small" data-role="remove-set" data-entry="${ei}" data-set="${si}">&times;</button></div>
       </div>
@@ -869,7 +923,7 @@ function drawLog(container, draft, status) {
       </div>` : ''}`;
     }).join('');
 
-    const checkinHtml = entryDone ? checkinSectionHtml(entry, ei) : '';
+    const feedbackHtml = feedbackSummaryHtml(entry, ei);
 
     return `
       <div class="ex-card ${entryDone ? 'ex-done' : ''}">
@@ -889,23 +943,29 @@ function drawLog(container, draft, status) {
         <div style="padding:10px 14px 14px">
           <button type="button" class="secondary small" data-role="add-set" data-entry="${ei}">+ Add Set</button>
         </div>
-        ${checkinHtml}
+        ${feedbackHtml}
       </div>
     `;
   }).join('');
 
   // Muscle-group check-in: one row per distinct muscle in this session, in
-  // first-seen order, enabled once every exercise for that muscle is done.
+  // first-seen order. Locked until every exercise for that muscle is done;
+  // once unlocked it's a button that opens the volume popup (it also opens
+  // automatically the instant the last exercise for that muscle is marked
+  // complete -- see the toggle-set-done handler in wireLogEvents).
   const muscleOrder = [];
   draft.entries.forEach((e) => { if (!muscleOrder.includes(e.muscleGroup)) muscleOrder.push(e.muscleGroup); });
   const muscleRows = muscleOrder.map((m) => {
     const entriesForMuscle = draft.entries.filter((e) => e.muscleGroup === m);
     const allDone = entriesForMuscle.every(isEntryDone);
     const current = draft.muscleFeedback ? draft.muscleFeedback[m] : null;
-    return `<div class="muscle-checkin-row">
-      <div class="muscle-checkin-label">${escapeHtml(VOLUME_LANDMARKS[m].label)}${!allDone ? ' <span class="muted small">(finish all exercises first)</span>' : ''}</div>
-      ${chipRowHtml('muscle-chip', null, m, VOLUME_CHIPS, current, !allDone)}
-    </div>`;
+    const statusHtml = current
+      ? `<span class="chip chip-${current} active small-tag">${VOLUME_CHIP_LABELS[current]}</span>`
+      : `<span class="muted small">${allDone ? 'Tap to answer' : 'Finish all exercises first'}</span>`;
+    return `<button type="button" class="muscle-checkin-row ${allDone ? 'clickable' : ''}" data-role="muscle-checkin-row" data-group="${m}" ${!allDone ? 'disabled' : ''}>
+      <span class="muscle-checkin-label-text">${escapeHtml(VOLUME_LANDMARKS[m].label)}</span>
+      ${statusHtml}
+    </button>`;
   }).join('');
 
   const addExerciseOptions = MUSCLE_GROUP_ORDER.map((m) => `<option value="${m}">${VOLUME_LANDMARKS[m].label}</option>`).join('');
@@ -963,7 +1023,11 @@ function drawLog(container, draft, status) {
 }
 
 function wireLogEvents(container, draft) {
-  const AUTOFILL_FIELDS = ['weight', 'reps', 'rir'];
+  // Autofill is a convenience prefill only -- weight and reps carry forward
+  // into the next set so you're not retyping the same numbers, but it never
+  // marks that next set complete. Completion is always a deliberate tap on
+  // the checkmark button, gated on reps being logged first.
+  const AUTOFILL_FIELDS = ['weight', 'reps'];
   container.querySelectorAll('input.cell-input').forEach((input) => {
     input.addEventListener('input', () => {
       const ei = parseInt(input.dataset.entry, 10);
@@ -973,8 +1037,8 @@ function wireLogEvents(container, draft) {
       scheduleSave();
       if (field === 'reps') {
         const row = input.closest('.set-row');
-        const check = row && row.querySelector('.set-check');
-        if (check) check.classList.toggle('done', input.value !== '');
+        const toggleBtn = row && row.querySelector('[data-role="toggle-set-done"]');
+        if (toggleBtn) toggleBtn.disabled = (input.value === '' || input.value === null || input.value === undefined);
       }
       // Carry this value forward to the next set's same field, but only if that
       // next field is still untouched -- so editing set 2 after it was auto-filled
@@ -988,14 +1052,13 @@ function wireLogEvents(container, draft) {
             nextInput.value = input.value;
             if (field === 'reps') {
               const nextRow = nextInput.closest('.set-row');
-              const nextCheck = nextRow && nextRow.querySelector('.set-check');
-              if (nextCheck) nextCheck.classList.toggle('done', input.value !== '');
+              const nextToggleBtn = nextRow && nextRow.querySelector('[data-role="toggle-set-done"]');
+              if (nextToggleBtn) nextToggleBtn.disabled = false;
             }
           }
           scheduleSave();
         }
       }
-      if (field === 'reps') refreshLogDynamicSections(container, draft);
     });
   });
 
@@ -1011,7 +1074,7 @@ function wireLogEvents(container, draft) {
   container.querySelectorAll('[data-role="add-set"]').forEach((btn) => {
     btn.addEventListener('click', () => {
       const ei = parseInt(btn.dataset.entry, 10);
-      draft.entries[ei].sets.push({ weight: '', reps: '', rir: '', tempo: '', notes: '' });
+      draft.entries[ei].sets.push({ weight: '', reps: '', rir: '', tempo: '', notes: '', done: false });
       scheduleSave();
       drawLog(container, draft, mesoStatus(STATE.meso, STATE.sessions));
     });
@@ -1058,15 +1121,52 @@ function wireLogEvents(container, draft) {
     });
   });
 
-  wireCheckinChips(container, draft, container);
-
-  container.querySelectorAll('[data-role="muscle-chip"]').forEach((btn) => {
+  // Marking a set complete is the only thing that can trigger the check-in
+  // popups -- never typing/autofill. If this was the exercise's last
+  // remaining set, the pain/felt-like popup opens; if it was also the last
+  // exercise for that muscle group, the volume popup follows right after.
+  container.querySelectorAll('[data-role="toggle-set-done"]').forEach((btn) => {
     btn.addEventListener('click', () => {
       if (btn.disabled) return;
-      draft.muscleFeedback = draft.muscleFeedback || {};
-      draft.muscleFeedback[btn.dataset.group] = btn.dataset.value;
+      const ei = parseInt(btn.dataset.entry, 10);
+      const si = parseInt(btn.dataset.set, 10);
+      const entry = draft.entries[ei];
+      const muscleGroup = entry.muscleGroup;
+      const entriesForMuscle = draft.entries.filter((e) => e.muscleGroup === muscleGroup);
+      const wasEntryDone = isEntryDone(entry);
+      const wasMuscleDone = entriesForMuscle.every(isEntryDone);
+
+      entry.sets[si].done = !entry.sets[si].done;
       scheduleSave();
+
+      const nowEntryDone = isEntryDone(entry);
+      const nowMuscleDone = entriesForMuscle.every(isEntryDone);
+
       drawLog(container, draft, mesoStatus(STATE.meso, STATE.sessions));
+
+      if (!wasEntryDone && nowEntryDone) {
+        openExerciseCheckinModal(draft, ei, container, () => {
+          if (!wasMuscleDone && nowMuscleDone) {
+            openMuscleCheckinModal(draft, muscleGroup, container);
+          }
+        });
+      } else if (!wasMuscleDone && nowMuscleDone) {
+        openMuscleCheckinModal(draft, muscleGroup, container);
+      }
+    });
+  });
+
+  container.querySelectorAll('[data-role="edit-checkin"]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const ei = parseInt(btn.dataset.entry, 10);
+      openExerciseCheckinModal(draft, ei, container);
+    });
+  });
+
+  container.querySelectorAll('[data-role="muscle-checkin-row"]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      if (btn.disabled) return;
+      openMuscleCheckinModal(draft, btn.dataset.group, container);
     });
   });
 
@@ -1085,7 +1185,7 @@ function wireLogEvents(container, draft) {
       if (!exerciseId) return;
       draft.entries.push({
         exerciseId, muscleGroup, targetSets: 2,
-        sets: Array.from({ length: 2 }, () => ({ weight: '', reps: '', rir: '', tempo: '', notes: '' })),
+        sets: Array.from({ length: 2 }, () => ({ weight: '', reps: '', rir: '', tempo: '', notes: '', done: false })),
         feedback: null
       });
       scheduleSave();

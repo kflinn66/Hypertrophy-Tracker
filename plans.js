@@ -90,7 +90,9 @@ function listAvailablePlans() {
 
 // Where in the MEV-MRV window to land the weekly target, based on days/week.
 // More training days = more recoverable volume, so we push closer to MRV.
-function targetWeeklySets(muscleGroup, daysPerWeek) {
+// A muscle group flagged as a priority goal gets pushed further toward its
+// MRV (never past it) for an extra growth/strength stimulus.
+function targetWeeklySets(muscleGroup, daysPerWeek, isPriority) {
   const lm = VOLUME_LANDMARKS[muscleGroup];
   if (!lm) return 0;
   let target;
@@ -101,7 +103,26 @@ function targetWeeklySets(muscleGroup, daysPerWeek) {
   } else {
     target = lm.mavHigh + 0.4 * (lm.mrv - lm.mavHigh);
   }
+  if (isPriority) {
+    target = Math.min(lm.mrv, target + 0.35 * (lm.mrv - target));
+  }
   return Math.max(0, Math.round(target));
+}
+
+// Stable-sorts a day's exercises so priority-muscle work comes first --
+// trained while the lifter is freshest -- without disturbing the relative
+// order of everything else.
+function prioritizeDayExercises(dayExercises, priorityMuscles) {
+  if (!priorityMuscles || priorityMuscles.length === 0) return dayExercises;
+  return dayExercises
+    .map((ex, idx) => ({ ex, idx }))
+    .sort((a, b) => {
+      const aP = priorityMuscles.includes(a.ex.muscleGroup) ? 0 : 1;
+      const bP = priorityMuscles.includes(b.ex.muscleGroup) ? 0 : 1;
+      if (aP !== bP) return aP - bP;
+      return a.idx - b.idx;
+    })
+    .map((x) => x.ex);
 }
 
 function pickExercisesForMuscle(muscleGroup, count) {
@@ -112,7 +133,10 @@ function pickExercisesForMuscle(muscleGroup, count) {
 
 // Builds a full plan: which exercises on which day, with a target set count each,
 // such that the week's total per muscle group lands on targetWeeklySets().
-function buildPlan(splitKey, daysPerWeek) {
+// priorityMuscles (optional array of muscleGroup keys) get extra weekly volume
+// and are trained first within each day they appear.
+function buildPlan(splitKey, daysPerWeek, priorityMuscles) {
+  priorityMuscles = priorityMuscles || [];
   const def = SPLIT_DEFINITIONS[splitKey];
   if (!def) throw new Error('Unknown split: ' + splitKey);
   if (!def.dayOptions.includes(daysPerWeek)) {
@@ -131,7 +155,7 @@ function buildPlan(splitKey, daysPerWeek) {
 
   const weeklyTargets = {};
   Object.keys(frequency).forEach((m) => {
-    weeklyTargets[m] = targetWeeklySets(m, daysPerWeek);
+    weeklyTargets[m] = targetWeeklySets(m, daysPerWeek, priorityMuscles.includes(m));
   });
 
   const days = schedule.map((day) => {
@@ -153,13 +177,14 @@ function buildPlan(splitKey, daysPerWeek) {
         dayExercises.push({ exerciseId: picks[1].id, muscleGroup, targetSets: perOccurrence - half });
       }
     });
-    return { dayLabel: day.dayLabel, muscles: day.muscles, exercises: dayExercises };
+    return { dayLabel: day.dayLabel, muscles: day.muscles, exercises: prioritizeDayExercises(dayExercises, priorityMuscles) };
   });
 
   return {
     splitKey,
     splitName: def.name,
     daysPerWeek,
+    priorityMuscles,
     weeklyTargets,
     days
   };
@@ -169,7 +194,8 @@ function buildPlan(splitKey, daysPerWeek) {
 // preset SPLIT_DEFINITIONS. customDays: [{ dayLabel, exercises: [{ exerciseId, muscleGroup }, ...] }, ...]
 // Each exercise must already carry its muscleGroup (the caller resolves this,
 // since custom exercises live outside this file's EXERCISES database).
-function buildCustomPlan(customDays) {
+function buildCustomPlan(customDays, priorityMuscles) {
+  priorityMuscles = priorityMuscles || [];
   if (!Array.isArray(customDays) || customDays.length === 0) {
     throw new Error('Add at least one training day.');
   }
@@ -190,7 +216,7 @@ function buildCustomPlan(customDays) {
 
   const weeklyTargets = {};
   Object.keys(frequency).forEach((m) => {
-    weeklyTargets[m] = targetWeeklySets(m, daysPerWeek);
+    weeklyTargets[m] = targetWeeklySets(m, daysPerWeek, priorityMuscles.includes(m));
   });
 
   const days = customDays.map((day) => {
@@ -221,18 +247,19 @@ function buildCustomPlan(customDays) {
       });
     });
 
-    return { dayLabel: day.dayLabel, muscles: groups.map((g) => g.muscleGroup), exercises: dayExercises };
+    return { dayLabel: day.dayLabel, muscles: groups.map((g) => g.muscleGroup), exercises: prioritizeDayExercises(dayExercises, priorityMuscles) };
   });
 
   return {
     splitKey: 'custom',
     splitName: 'Custom Split',
     daysPerWeek,
+    priorityMuscles,
     weeklyTargets,
     days
   };
 }
 
 if (typeof module !== 'undefined') {
-  module.exports = { SPLIT_DEFINITIONS, listAvailablePlans, targetWeeklySets, buildPlan, pickExercisesForMuscle, buildCustomPlan };
+  module.exports = { SPLIT_DEFINITIONS, listAvailablePlans, targetWeeklySets, buildPlan, pickExercisesForMuscle, buildCustomPlan, prioritizeDayExercises };
 }

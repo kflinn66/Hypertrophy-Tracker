@@ -380,8 +380,14 @@ input.cell-input.secondary-input { font-size: 12px; font-weight: 400; }
   display: flex; align-items: center; justify-content: center;
   color: transparent; font-size: 12px; font-weight: 900;
   flex-shrink: 0;
+  padding: 0;
+  background: transparent;
+  cursor: pointer;
+  transition: border-color .15s ease, color .15s ease, background-color .15s ease, transform .1s ease;
 }
-.set-check.done { border-color: var(--good); color: var(--good); }
+.set-check:active { transform: scale(0.92); }
+.set-check:disabled { cursor: not-allowed; opacity: 0.35; }
+.set-check.done { border-color: var(--good); color: var(--good); background: color-mix(in srgb, var(--good) 16%, transparent); }
 .set-extra-row { display: flex; gap: 8px; padding: 0 14px 10px 44px; }
 .set-row-actions { flex-shrink: 0; }
 
@@ -450,7 +456,6 @@ hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
 }
 
 /* ---------------- Chips (pain / difficulty / muscle-volume check-ins) ---------------- */
-.exercise-checkin { border-top: 1px solid var(--border); padding: 12px 14px 14px; }
 .checkin-row { margin-bottom: 10px; }
 .checkin-row:last-child { margin-bottom: 0; }
 .checkin-label { display: block; font-size: 10.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; font-weight: 700; margin-bottom: 6px; }
@@ -466,9 +471,11 @@ hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
   font-size: 11.5px;
   font-weight: 700;
   text-align: center;
+  cursor: pointer;
 }
 .chip:active { transform: scale(0.97); }
-.chip:disabled { opacity: 0.45; }
+.chip:disabled { opacity: 0.45; cursor: not-allowed; }
+.chip.small-tag { flex: none; padding: 4px 10px; font-size: 10.5px; cursor: default; }
 .chip-none.active { background: var(--muted); color: var(--page); border-color: var(--muted); }
 .chip-mild.active { background: var(--warning); color: #1a1200; border-color: var(--warning); }
 .chip-sharp.active { background: var(--critical); color: #fff; border-color: var(--critical); }
@@ -478,9 +485,98 @@ hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
 .chip-little.active { background: var(--warning); color: #1a1200; border-color: var(--warning); }
 .chip-much.active { background: var(--serious); color: #fff; border-color: var(--serious); }
 
-.muscle-checkin-row { padding: 10px 0; border-top: 1px solid var(--border); }
+/* Post check-in summary shown on the exercise card once answered -- tap to
+   reopen the popup and change an answer. */
+.feedback-summary {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-top: 1px solid var(--border);
+  border-radius: 0;
+  padding: 10px 14px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.feedback-summary:active { background: var(--surface-raised); }
+.feedback-summary .edit-hint { color: var(--accent); font-weight: 700; margin-left: 4px; }
+
+/* Muscle Group Check-In summary rows -- locked until the muscle is fully
+   logged, then a button that opens the volume popup. */
+.muscle-checkin-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+  border-left: none; border-right: none; border-bottom: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+}
 .muscle-checkin-row:first-of-type { border-top: none; padding-top: 2px; }
-.muscle-checkin-label { font-size: 12.5px; font-weight: 700; margin-bottom: 7px; }
+.muscle-checkin-row.clickable { cursor: pointer; }
+.muscle-checkin-row.clickable:active { background: var(--surface-raised); }
+.muscle-checkin-row:disabled { cursor: not-allowed; opacity: 0.6; }
+.muscle-checkin-label-text { font-size: 12.5px; font-weight: 700; }
+
+/* ---------------- Priority-muscle picker (onboarding) ---------------- */
+.priority-grid { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+.priority-chip {
+  background: var(--surface-raised);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 8px 14px;
+  font-size: 12.5px;
+  font-weight: 700;
+}
+.priority-chip.active { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+.priority-chip:active { transform: scale(0.97); }
+
+/* ---------------- Check-in popups ---------------- */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.55);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  z-index: 100;
+  animation: modal-fade-in .15s ease;
+}
+@keyframes modal-fade-in { from { opacity: 0; } to { opacity: 1; } }
+.modal-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 20px 20px 0 0;
+  padding: 20px 18px calc(20px + env(safe-area-inset-bottom, 0px));
+  width: 100%;
+  max-width: 560px;
+  box-shadow: 0 -8px 30px rgba(0,0,0,0.35);
+  position: relative;
+  animation: modal-slide-up .2s ease;
+}
+@keyframes modal-slide-up { from { transform: translateY(16px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+.modal-card h2 { margin: 0 0 4px; font-size: 16px; font-weight: 700; padding-right: 30px; }
+.modal-card > .muted.small { margin: 0 0 14px; }
+.modal-close {
+  position: absolute;
+  top: 14px; right: 14px;
+  width: 28px; height: 28px;
+  padding: 0;
+  background: var(--surface-raised);
+  color: var(--muted);
+  border: none;
+  border-radius: 50%;
+  font-size: 15px;
+  line-height: 1;
+}
 
 /* ---------------- Clickable list rows (session history) ---------------- */
 .list-row.clickable { cursor: pointer; transition: background .15s ease; margin: 0 -8px; padding: 11px 8px; border-radius: 10px; }
