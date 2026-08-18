@@ -178,6 +178,13 @@ const Sync = {
 
 Sync.init();
 
+// `const` declarations at the top level of a classic (non-module) script
+// create a global lexical binding but do NOT become a property of `window`
+// (unlike `var` or a function declaration). app.js checks `window.Sync`, so
+// without this line that check always sees `undefined` and silently skips
+// the auth gate / account UI even though `Sync` itself works fine.
+window.Sync = Sync;
+
 // ---------------------------------------------------------------------------
 // Wrap DB's write methods so every write also mirrors to Supabase. This
 // intentionally does not touch db.js -- IndexedDB behavior is unchanged,
