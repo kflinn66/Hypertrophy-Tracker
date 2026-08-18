@@ -210,16 +210,33 @@ function appShell(bodyHtml, activeRoute, title, subtitle) {
   `;
 }
 
+// Inline outline-style SVGs (stroke uses currentColor so they inherit the
+// nav's muted/accent text color for free) -- kept as plain strings so the
+// nav never depends on an icon font or CDN fetch, matching the rest of this
+// no-build-step, offline-first app.
+const NAV_ICONS = {
+  dashboard: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/></svg>',
+  log: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>',
+  progress: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>',
+  settings: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>'
+};
+
 function bottomNavHtml(active) {
   const items = [
-    { route: 'dashboard', icon: '▦', label: 'Dashboard' },
-    { route: 'log', icon: '✎', label: 'Log' },
-    { route: 'progress', icon: '↗', label: 'Progress' },
-    { route: 'settings', icon: '⚙', label: 'Settings' }
+    { route: 'dashboard', label: 'Dashboard' },
+    { route: 'log', label: 'Log' },
+    { route: 'progress', label: 'Progress' },
+    { route: 'settings', label: 'Settings' }
   ];
   return `<div class="bottomnav">${items.map((i) =>
-    `<a href="#/${i.route}" class="${i.route === active ? 'active' : ''}"><span class="icon">${i.icon}</span>${i.label}</a>`
+    `<a href="#/${i.route}" class="${i.route === active ? 'active' : ''}"><span class="icon">${NAV_ICONS[i.route]}</span>${i.label}</a>`
   ).join('')}</div>`;
+}
+
+// Shared empty-state markup (small muted icon + message) so "nothing here
+// yet" screens read as designed rather than as a bare line of gray text.
+function emptyState(text) {
+  return `<div class="empty-state"><svg class="empty-state-icon" viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9" stroke-dasharray="2.5 3.5"/></svg><p>${text}</p></div>`;
 }
 
 function escapeHtml(str) {
@@ -768,9 +785,18 @@ function renderDashboard(container) {
       const cls = classifyVolume(m, logged);
       const meta = statusMeta(cls);
       const pct = Math.min(100, Math.round((logged / lm.mrv) * 100));
+      // Reference ticks at MEV and the start of MAV, shown even at 0% fill,
+      // so an early-week glance at an empty bar still tells you where you're
+      // headed instead of reading as blank/broken.
+      const mevPct = Math.min(100, Math.round((lm.mev / lm.mrv) * 100));
+      const mavPct = Math.min(100, Math.round((lm.mavLow / lm.mrv) * 100));
       return `<div class="meter-row">
         <span class="name">${escapeHtml(lm.label)}</span>
-        <div class="meter-track"><div class="meter-fill ${meta.fillClass}" style="width:${pct}%"></div></div>
+        <div class="meter-track">
+          <div class="meter-fill ${meta.fillClass}" style="width:${pct}%"></div>
+          <span class="meter-tick" style="left:${mevPct}%"></span>
+          <span class="meter-tick" style="left:${mavPct}%"></span>
+        </div>
         <span class="meter-status ${meta.textClass}">${meta.label}</span>
       </div>`;
     }).join('');
@@ -778,7 +804,7 @@ function renderDashboard(container) {
     const recent = completedSessions(STATE.sessions).sort((a, b) => (a.date < b.date ? 1 : -1)).slice(0, 3);
     const recentHtml = recent.length
       ? recent.map(sessionRowHtml).join('')
-      : `<p class="empty-state">No workouts logged yet.</p>`;
+      : emptyState('No workouts logged yet.');
     const streak = computeTrainingStreak(STATE.sessions);
     const showBackupNudge = shouldShowBackupNudge(STATE.settings, STATE.sessions);
 
@@ -794,10 +820,10 @@ function renderDashboard(container) {
       <div class="stat-row">
         <div class="stat-tile clickable" data-role="stat-workouts" role="button" tabindex="0" aria-label="View session history"><div class="val">${totalCompleted}</div><div class="lbl">Workouts</div></div>
         <div class="stat-tile clickable" data-role="stat-week" role="button" tabindex="0" aria-label="View plan details"><div class="val">${weekLabel}</div><div class="lbl">${escapeHtml(plan.splitName)}</div></div>
-        <div class="stat-tile clickable" data-role="stat-volume" role="button" tabindex="0" aria-label="Jump to this week's volume"><div class="val ${overallOk ? 'status-mav' : 'status-high'}">${overallOk ? '✓' : '!'}</div><div class="lbl">${overallOk ? 'On Track' : 'Check Volume'}</div></div>
+        <div class="stat-tile clickable ${overallOk ? '' : 'stat-tile-warning'}" data-role="stat-volume" role="button" tabindex="0" aria-label="Jump to this week's volume"><div class="val ${overallOk ? 'status-mav' : 'status-high'}">${overallOk ? '✓' : '!'}</div><div class="lbl">${overallOk ? 'On Track' : 'Check Volume'}</div></div>
       </div>
 
-      <div class="card">
+      <div class="card hero">
         <h2>Today</h2>
         <div class="today-title">${escapeHtml(todayDay.dayLabel)}</div>
         <div class="today-sub">${todayDay.muscles.map((m) => VOLUME_LANDMARKS[m].label).join(' · ')}</div>
@@ -1239,10 +1265,22 @@ function wireLogEvents(container, draft) {
         const toggleBtn = row && row.querySelector('[data-role="toggle-set-done"]');
         if (toggleBtn) toggleBtn.disabled = (input.value === '' || input.value === null || input.value === undefined);
       }
-      // Carry this value forward to the next set's same field, but only if that
-      // next field is still untouched -- so editing set 2 after it was auto-filled
-      // from set 1 will in turn carry forward into set 3, and so on.
-      if (AUTOFILL_FIELDS.includes(field) && input.value !== '') {
+    });
+
+    // Carry the *final* value forward to the next set's same field once the
+    // user is actually done editing this one (blur, tab-away, etc.) -- not on
+    // every keystroke. Firing on every keystroke used to carry forward only
+    // the first character typed (e.g. typing "50" left the next set with
+    // "5", because after that first "5" copied over, the next-set field was
+    // no longer empty, so later keystrokes stopped overwriting it). Only if
+    // that next field is still untouched -- so editing set 2 after it was
+    // auto-filled from set 1 will in turn carry forward into set 3, and so on.
+    if (AUTOFILL_FIELDS.includes(input.dataset.field)) {
+      input.addEventListener('change', () => {
+        const ei = parseInt(input.dataset.entry, 10);
+        const si = parseInt(input.dataset.set, 10);
+        const field = input.dataset.field;
+        if (input.value === '') return;
         const nextSet = draft.entries[ei].sets[si + 1];
         if (nextSet && (nextSet[field] === '' || nextSet[field] === null || nextSet[field] === undefined)) {
           nextSet[field] = input.value;
@@ -1257,8 +1295,8 @@ function wireLogEvents(container, draft) {
           }
           scheduleSave();
         }
-      }
-    });
+      });
+    }
   });
 
   container.querySelectorAll('[data-role="swap-exercise"]').forEach((sel) => {
@@ -1348,6 +1386,17 @@ function wireLogEvents(container, draft) {
       const justCompleted = !entry.sets[si].done;
       entry.sets[si].done = justCompleted;
       scheduleSave();
+
+      // Celebrate a PR the instant it happens, not buried in a session-detail
+      // screen the lifter may not open until days later -- the payoff should
+      // land in the same moment as the effort. Warm-ups never qualify.
+      if (justCompleted && !entry.sets[si].warmup) {
+        const set = entry.sets[si];
+        if (isPRSet(STATE.sessions, draft, entry.exerciseId, set.weight, set.reps)) {
+          const ex = exerciseById(entry.exerciseId);
+          showToast(`New PR on ${ex ? ex.name : 'that exercise'} \u{1F3C6}`, { type: 'success', duration: 3600 });
+        }
+      }
 
       const nowEntryDone = isEntryDone(entry);
       const nowMuscleDone = entriesForMuscle.every(isEntryDone);
@@ -1688,9 +1737,9 @@ function drawProgress(container, selectedExerciseId) {
       chartData = trendChartMarkup(trendPoints);
       chartHtml = `<p class="small muted" style="margin:0 0 8px">Estimated 1-rep max (Epley formula), most recent working set each session</p>${chartData.html}`;
     } else if (trendPoints.length === 1) {
-      chartHtml = '<p class="empty-state">Log this exercise once more to start seeing a trend.</p>';
+      chartHtml = emptyState('Log this exercise once more to start seeing a trend.');
     } else {
-      chartHtml = '<p class="empty-state">No logged working sets yet for this exercise.</p>';
+      chartHtml = emptyState('No logged working sets yet for this exercise.');
     }
   }
 
@@ -1702,7 +1751,7 @@ function drawProgress(container, selectedExerciseId) {
   const body = `
     <div class="card">
       <h2>Session History</h2>
-      ${historyRows || '<p class="empty-state">No completed workouts yet.</p>'}
+      ${historyRows || emptyState('No completed workouts yet.')}
     </div>
     <div class="card">
       <h2>Exercise Trend</h2>
@@ -1873,7 +1922,7 @@ function renderSettings(container) {
           </div>
         </div>
         <button type="button" class="ghost small" data-role="delete-custom-exercise" data-id="${e.id}">Delete</button>
-      </div>`).join('') : '<p class="empty-state">No custom exercises yet.</p>'}
+      </div>`).join('') : emptyState('No custom exercises yet.')}
       <div class="field" style="margin-top:12px">
         <label>Name</label>
         <input type="text" id="newExName" placeholder="e.g. Cable Chest Press">

@@ -139,15 +139,16 @@ html, body {
   text-decoration: none;
 }
 .bottomnav a .icon {
-  display: block;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   width: 22px;
   height: 22px;
-  line-height: 22px;
   margin: 0 auto 3px;
   border-radius: 7px;
   background: var(--surface-raised);
-  font-size: 12px;
 }
+.bottomnav a .icon svg { display: block; }
 .bottomnav a.active { color: var(--accent); font-weight: 700; }
 .bottomnav a.active .icon { background: var(--accent); color: var(--accent-text); }
 
@@ -197,16 +198,34 @@ html, body {
 }
 .stat-tile .val { font-size: 20px; font-weight: 700; line-height: 1.1; }
 .stat-tile .lbl { font-size: 10px; color: var(--muted); margin-top: 3px; text-transform: uppercase; letter-spacing: .03em; } .stat-tile.clickable { cursor: pointer; transition: background .15s ease, transform .1s ease; } .stat-tile.clickable:hover { background: var(--surface-raised); } .stat-tile.clickable:active { transform: scale(0.97); } .stat-tile.clickable:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* A tile that needs attention (e.g. "Check Volume") gets a warning tint so
+   it visually separates itself from neutral stats instead of reading with
+   the same weight as "0 Workouts". */
+.stat-tile.stat-tile-warning { border-color: color-mix(in srgb, var(--warning) 45%, var(--border)); background: color-mix(in srgb, var(--warning) 10%, var(--surface)); }
 
 /* ---------------- Today / hero card ---------------- */
 .today-title { font-size: 19px; font-weight: 700; margin-bottom: 2px; letter-spacing: -0.01em; }
 .today-sub { font-size: 12px; color: var(--text-secondary); margin-bottom: 14px; }
+/* The primary action of the whole app lives in this card -- give it a touch
+   more visual weight than a plain data card so the eye lands here first. */
+.card.hero {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 9%, var(--surface)) 0%, var(--surface) 65%);
+}
 
 /* ---------------- Volume meters (replaces the volume table) ---------------- */
 .meter-row { display: flex; align-items: center; gap: 10px; padding: 7px 0; }
 .meter-row .name { width: 78px; font-size: 12px; font-weight: 600; flex-shrink: 0; }
-.meter-track { flex: 1; height: 8px; background: var(--track-bg); border-radius: 5px; overflow: hidden; }
+.meter-track { position: relative; flex: 1; height: 8px; background: var(--track-bg); border-radius: 5px; overflow: hidden; }
 .meter-fill { height: 100%; border-radius: 5px; transition: width .2s ease; }
+/* Reference ticks at the MEV / MAV thresholds -- visible even at 0% fill so
+   an early-mesocycle glance still shows where the targets are, instead of
+   just a blank track. */
+.meter-tick { position: absolute; top: 0; bottom: 0; width: 2px; background: rgba(255,255,255,0.4); }
+:root[data-theme="light"] .meter-tick { background: rgba(0,0,0,0.22); }
+@media (prefers-color-scheme: light) {
+  :root[data-theme="system"] .meter-tick { background: rgba(0,0,0,0.22); }
+}
 .meter-status { width: 76px; text-align: right; font-size: 10px; font-weight: 700; flex-shrink: 0; }
 
 .status-under    { color: var(--muted); }
@@ -430,7 +449,9 @@ input.cell-input.secondary-input { font-size: 12px; font-weight: 400; }
 .ex-timer-icon { font-size: 12px; }
 .ex-timer-badge:active { background: var(--accent-dark); }
 
-.empty-state { text-align: center; padding: 34px 10px; color: var(--muted); font-size: 13px; }
+.empty-state { text-align: center; padding: 30px 10px; color: var(--muted); font-size: 13px; }
+.empty-state-icon { color: var(--muted); opacity: 0.55; margin-bottom: 8px; }
+.empty-state p { margin: 0; }
 
 a { color: var(--accent); }
 hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
@@ -744,6 +765,26 @@ hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
   content: '';
   position: absolute;
   inset: -10px;
+}
+
+/* ---------------- Install-app prompt (button lives in index.html) ----------------
+   Used to be pinned bottom-right, where it collided with the rest timer, the
+   Discard Workout button, and even a destructive-action confirm modal's own
+   buttons. Moved to a small, quiet chip in the top-right corner instead, and
+   it now fully hides itself whenever a modal or the update banner is up. */
+#installBtn {
+  position: fixed;
+  top: calc(10px + env(safe-area-inset-top, 0px));
+  right: 14px;
+  z-index: 15;
+  padding: 6px 12px;
+  font-size: 12px;
+  border-radius: 20px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.18);
+}
+body:has(.modal-overlay) #installBtn,
+body:has(.update-banner) #installBtn {
+  display: none !important;
 }
 
 /* ---------------- Bodyweight log (Settings) ---------------- */
