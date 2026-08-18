@@ -367,7 +367,12 @@ function mesoStatus(meso, sessions) {
   const totalWeeks = meso.trainingWeeks + 1;
   const isDeload = weekIndex === meso.trainingWeeks;
   const isComplete = weekIndex > meso.trainingWeeks;
-  const dayIndex = count % meso.daysPerWeek;
+  // dayOffset lets you manually shift which plan day "today" lands on --
+  // e.g. you already trained Push outside the app and want to pick up on
+  // Pull instead of waiting for the normal count-based rotation to get
+  // there. Stored on the mesocycle so it persists and the rest of the
+  // rotation continues on from wherever you pick, rather than resetting.
+  const dayIndex = (((count + (meso.dayOffset || 0)) % meso.daysPerWeek) + meso.daysPerWeek) % meso.daysPerWeek;
   const weekStartIdx = weekIndex * meso.daysPerWeek;
   const currentWeekSessions = mesoSessions.slice(weekStartIdx, weekStartIdx + meso.daysPerWeek);
   return { count, weekIndex, totalWeeks, isDeload, isComplete, dayIndex, currentWeekSessions };
@@ -908,6 +913,11 @@ function renderDashboard(container) {
       : emptyState('No workouts logged yet.');
     const streak = computeTrainingStreak(STATE.sessions);
     const showBackupNudge = shouldShowBackupNudge(STATE.settings, STATE.sessions);
+    // Only offer to switch today's day before a workout is actually started --
+    // once sets are being logged, the draft is already tied to that day's
+    // exercise list, so swapping underneath it would be confusing.
+    const hasInProgressDraft = !!(STATE.draft && !STATE.draft.completed);
+    const canSwitchDay = !hasInProgressDraft && plan.days.length > 1;
 
     body = `
       ${streak >= 2 ? `<div class="streak-strip">&#128293; ${streak}-week training streak &mdash; keep it going</div>` : ''}
@@ -928,7 +938,8 @@ function renderDashboard(container) {
         <h2>Today</h2>
         <div class="today-title">${escapeHtml(todayDay.dayLabel)}</div>
         <div class="today-sub">${todayDay.muscles.map((m) => VOLUME_LANDMARKS[m].label).join(' · ')}</div>
-        <button class="block" data-role="go-log">${STATE.draft && !STATE.draft.completed ? 'Resume Workout' : 'Start Workout'}</button>
+        <button class="block" data-role="go-log">${hasInProgressDraft ? 'Resume Workout' : 'Start Workout'}</button>
+        ${canSwitchDay ? `<button type="button" class="ghost" data-role="switch-day" style="margin-top:10px;width:100%">Not ${escapeHtml(todayDay.dayLabel)}? Switch day</button>` : ''}
       </div>
 
       <div class="card">
@@ -954,6 +965,8 @@ function renderDashboard(container) {
   container.innerHTML = appShell(body, 'dashboard', 'HyperTrack', STATE.meso.plan.splitName);
   const goLogBtn = container.querySelector('[data-role="go-log"]');
   if (goLogBtn) goLogBtn.addEventListener('click', () => goTo('log'));
+  const switchDayBtn = container.querySelector('[data-role="switch-day"]');
+  if (switchDayBtn) switchDayBtn.addEventListener('click', () => openSwitchDayModal());
   const bindActivatable = (el, handler) => { if (!el) return; el.addEventListener('click', handler); el.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handler(); } }); };
   bindActivatable(container.querySelector('[data-role="stat-workouts"]'), () => goTo('progress'));
   bindActivatable(container.querySelector('[data-role="stat-week"]'), () => goTo('settings'));
@@ -976,6 +989,52 @@ function renderDashboard(container) {
     });
   }
   wireSessionRows(container, 'dashboard');
+}
+
+// Lets you pick which day of the split "today" should be, instead of always
+// following the count-based rotation. Handles the "I already did Push
+// earlier, I want to start with Pull" case -- picks a dayOffset such that
+// the chosen day lines up right now, and the rotation continues on from
+// there afterward (it doesn't just show the picked day once and snap back).
+function openSwitchDayModal() {
+  closeAnyModal();
+  const status = mesoStatus(STATE.meso, STATE.sessions);
+  const plan = STATE.meso.plan;
+  const modal = document.createElement('div');
+  modal.className = 'modal-overlay';
+  modal.innerHTML = `
+    <div class="modal-card">
+      <h2>Switch Today's Day</h2>
+      <p class="muted small" style="margin:0 0 14px">Pick which day of your ${escapeHtml(plan.splitName)} split to start today. Your rotation picks up from there afterward.</p>
+      <div style="display:flex;flex-direction:column;gap:8px">
+        ${plan.days.map((d, i) => `
+          <button type="button" class="secondary block" data-role="pick-day" data-index="${i}" style="text-align:left;${i === status.dayIndex ? 'border-color:var(--accent);background:color-mix(in srgb, var(--accent) 14%, var(--surface-raised))' : ''}">
+            <span style="font-weight:700">${escapeHtml(d.dayLabel)}</span>${i === status.dayIndex ? ' <span class="tag" style="vertical-align:1px">Current</span>' : ''}
+            <span class="muted" style="display:block;font-size:11px;margin-top:2px;font-weight:400">${d.muscles.map((m) => VOLUME_LANDMARKS[m].label).join(' · ')}</span>
+          </button>`).join('')}
+      </div>
+      <button type="button" class="ghost block" data-role="modal-cancel" style="margin-top:14px">Cancel</button>
+    </div>`;
+  document.body.appendChild(modal);
+  const cleanup = () => modal.remove();
+  modal.querySelector('[data-role="modal-cancel"]').addEventListener('click', cleanup);
+  modal.addEventListener('click', (e) => { if (e.target === modal) cleanup(); });
+  modal.querySelectorAll('[data-role="pick-day"]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const targetIndex = parseInt(btn.dataset.index, 10);
+      const daysPerWeek = STATE.meso.daysPerWeek;
+      const newOffset = ((targetIndex - status.count) % daysPerWeek + daysPerWeek) % daysPerWeek;
+      try {
+        await DB.updateMesocycle(STATE.meso.id, { dayOffset: newOffset });
+        STATE.meso = await DB.getMesocycle(STATE.meso.id);
+        cleanup();
+        renderDashboard(document.getElementById('app'));
+      } catch (err) {
+        console.error('Failed to switch day', err);
+        showToast('Could not switch day — please try again.', { type: 'error', duration: 4000 });
+      }
+    });
+  });
 }
 
 // ---------------------------------------------------------------------------
