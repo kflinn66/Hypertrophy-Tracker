@@ -109,6 +109,106 @@ function showUpdateBanner(reg) {
 // ---------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Cloud sync auth gate -- shown before the app loads if Supabase is wired up
+// (see js/sync.js) and no session is active yet. "Skip for now" always
+// stays available so a Supabase hiccup, or simply not wanting an account,
+// never blocks using the app the way it always worked.
+// ---------------------------------------------------------------------------
+function renderAuthGate() {
+  let mode = 'signin';
+  const app = document.getElementById('app');
+  app.innerHTML = `
+    <div class="appbar"><div><h1>HyperTrack</h1></div></div>
+    <div class="view" style="max-width:400px">
+      <div class="card">
+        <h2 id="authTitle" style="font-size:16px;text-transform:none;letter-spacing:0;color:var(--text)">Sign In</h2>
+        <p class="small muted" style="margin-top:-4px">Sync your workouts across devices so they never live only in this browser.</p>
+        <div class="field"><label>Email</label><input type="email" id="authEmail" placeholder="you@example.com"></div>
+        <div class="field"><label>Password</label><input type="password" id="authPassword" placeholder="At least 6 characters"></div>
+        <p id="authError" class="small" style="color:var(--critical);display:none;margin-bottom:10px"></p>
+        <p id="authNotice" class="small" style="color:var(--good);display:none;margin-bottom:10px"></p>
+        <button class="block" id="authSubmitBtn">Sign In</button>
+        <p class="small muted" style="text-align:center;margin-top:14px"><a href="#" id="authToggleMode">Need an account? Create one</a></p>
+        <p class="small muted" style="text-align:center;margin-top:6px"><a href="#" id="authSkip">Skip for now &mdash; use offline only</a></p>
+      </div>
+    </div>`;
+
+  const emailEl = document.getElementById('authEmail');
+  const passEl = document.getElementById('authPassword');
+  const errEl = document.getElementById('authError');
+  const noticeEl = document.getElementById('authNotice');
+  const submitBtn = document.getElementById('authSubmitBtn');
+  const titleEl = document.getElementById('authTitle');
+  const toggleLink = document.getElementById('authToggleMode');
+
+  const setError = (msg) => { errEl.textContent = msg; errEl.style.display = msg ? 'block' : 'none'; };
+  const setNotice = (msg) => { noticeEl.textContent = msg; noticeEl.style.display = msg ? 'block' : 'none'; };
+  const applyMode = () => {
+    titleEl.textContent = mode === 'signin' ? 'Sign In' : 'Create Account';
+    submitBtn.textContent = mode === 'signin' ? 'Sign In' : 'Create Account';
+    toggleLink.textContent = mode === 'signin' ? 'Need an account? Create one' : 'Already have an account? Sign in';
+  };
+
+  toggleLink.addEventListener('click', (e) => {
+    e.preventDefault();
+    mode = mode === 'signin' ? 'signup' : 'signin';
+    applyMode();
+    setError(''); setNotice('');
+  });
+  document.getElementById('authSkip').addEventListener('click', (e) => {
+    e.preventDefault();
+    startApp();
+  });
+  submitBtn.addEventListener('click', async () => {
+    setError(''); setNotice('');
+    const email = emailEl.value.trim();
+    const password = passEl.value;
+    if (!email || !password) { setError('Enter an email and password.'); return; }
+    submitBtn.disabled = true;
+    try {
+      if (mode === 'signin') {
+        await Sync.signIn(email, password);
+        STATE.authEmail = email;
+        await Sync.syncOnLogin();
+        startApp();
+      } else {
+        await Sync.signUp(email, password);
+        setNotice('Check your email to confirm your account, then sign in below.');
+        mode = 'signin';
+        applyMode();
+      }
+    } catch (err) {
+      setError(err.message || 'Something went wrong.');
+    } finally {
+      submitBtn.disabled = false;
+    }
+  });
+}
+
+async function startApp() {
+  try {
+    STATE.settings = await DB.getSettings();
+    STATE.meso = await DB.getActiveMesocycle();
+    STATE.sessions = await DB.getAllSessions();
+    STATE.customExercises = await DB.getAllCustomExercises();
+  } catch (e) {
+    console.error('Failed to load app data', e);
+    document.getElementById('app').innerHTML = `<div class="view"><div class="card">
+      <h2>Couldn't load your data</h2>
+      <p>Something went wrong reading your workout data from this browser. Try reloading the page. If this keeps happening, your device's storage may be full.</p>
+      <button class="block" onclick="location.reload()">Reload</button>
+    </div></div>`;
+    return;
+  }
+  TIMER.remaining = STATE.settings.restTimerSeconds || 105;
+  TIMER.total = TIMER.remaining;
+  applyTheme(STATE.settings.theme || 'dark');
+
+  window.addEventListener('hashchange', () => renderRoute());
+  renderRoute();
+}
+
 async function boot() {
   if ('serviceWorker' in navigator) {
     try {
@@ -137,26 +237,27 @@ async function boot() {
   if (navigator.storage && navigator.storage.persist) {
     try { await navigator.storage.persist(); } catch (e) { /* best effort */ }
   }
-  try {
-    STATE.settings = await DB.getSettings();
-    STATE.meso = await DB.getActiveMesocycle();
-    STATE.sessions = await DB.getAllSessions();
-    STATE.customExercises = await DB.getAllCustomExercises();
-  } catch (e) {
-    console.error('Failed to load app data', e);
-    document.getElementById('app').innerHTML = `<div class="view"><div class="card">
-      <h2>Couldn't load your data</h2>
-      <p>Something went wrong reading your workout data from this browser. Try reloading the page. If this keeps happening, your device's storage may be full.</p>
-      <button class="block" onclick="location.reload()">Reload</button>
-    </div></div>`;
+
+  // If cloud sync is wired up (js/sync.js) and nobody's signed in on this
+  // device yet, show the sign-in gate first -- but "Skip for now" inside it
+  // always falls through to startApp() so a Supabase outage, or just not
+  // wanting an account, never blocks using the app like it always has.
+  if (window.Sync && Sync.enabled) {
+    try {
+      const session = await Sync.getSession();
+      if (session) {
+        STATE.authEmail = session.user.email;
+        await Sync.syncOnLogin();
+        Sync.onAuthStateChange((s) => { if (!s) location.reload(); });
+        await startApp();
+        return;
+      }
+    } catch (e) { console.warn('Cloud sync check failed, continuing offline', e); }
+    renderAuthGate();
     return;
   }
-  TIMER.remaining = STATE.settings.restTimerSeconds || 105;
-  TIMER.total = TIMER.remaining;
-  applyTheme(STATE.settings.theme || 'dark');
 
-  window.addEventListener('hashchange', () => renderRoute());
-  renderRoute();
+  await startApp();
 }
 
 function applyTheme(theme) {
@@ -1884,7 +1985,20 @@ function renderSettings(container) {
       </div>
     </div>`).join('');
   const todayIso = new Date().toISOString().slice(0, 10);
+  const syncEmail = (window.Sync && Sync.client && Sync._userId) ? (STATE.authEmail || 'Signed in') : null;
+  const accountCard = (window.Sync && Sync.enabled) ? `
+    <div class="card">
+      <h2>Account</h2>
+      ${syncEmail ? `
+        <p class="small" style="margin-top:-4px">Signed in as <strong>${escapeHtml(syncEmail)}</strong>. Your workouts sync automatically.</p>
+        <button type="button" class="secondary block" data-role="sign-out">Sign Out</button>
+      ` : `
+        <p class="small muted" style="margin-top:-4px">You're using this device offline-only. Sign in to sync your workouts across devices.</p>
+        <button type="button" class="block" data-role="go-sign-in">Sign In / Create Account</button>
+      `}
+    </div>` : '';
   const body = `
+    ${accountCard}
     <div class="card">
       <h2>Appearance</h2>
       <div class="theme-toggle" id="themeToggle" role="group" aria-label="Theme">
@@ -2091,6 +2205,28 @@ function renderSettings(container) {
       showToast('Could not save preferences.', { type: 'error' });
     }
   });
+
+  const signOutBtn = container.querySelector('[data-role="sign-out"]');
+  if (signOutBtn) {
+    signOutBtn.addEventListener('click', () => {
+      openConfirmModal('Sign out of this device? Your workouts stay saved in the cloud and locally on this device.', {
+        confirmLabel: 'Sign Out',
+        onConfirm: async () => {
+          try {
+            await Sync.signOut();
+            location.reload();
+          } catch (err) {
+            console.error('Sign out failed', err);
+            showToast('Could not sign out — try again.', { type: 'error' });
+          }
+        }
+      });
+    });
+  }
+  const goSignInBtn = container.querySelector('[data-role="go-sign-in"]');
+  if (goSignInBtn) {
+    goSignInBtn.addEventListener('click', () => renderAuthGate());
+  }
 
   const bwLogBtn = container.querySelector('#bwLogBtn');
   if (bwLogBtn) {
