@@ -21,10 +21,26 @@ const TABLE_FOR_STORE = {
   customPlans: 'custom_plans'
 };
 
+// Supabase's email confirmation link redirects back here with the result
+// encoded in the URL fragment (e.g. #access_token=...&type=signup). The
+// supabase-js client below consumes and clears that fragment automatically
+// on init (detectSessionInUrl), so it has to be read here, first, or it's
+// gone by the time app.js could look for it. Captured once at module load
+// and exposed on Sync so app.js's boot() can show a "you're verified"
+// message instead of silently landing on the dashboard with no
+// acknowledgment that anything happened.
+const _authRedirectParams = new URLSearchParams(
+  (typeof location !== 'undefined' && location.hash ? location.hash.replace(/^#/, '') : '')
+);
+const _authRedirectType = _authRedirectParams.get('type');
+
 const Sync = {
   enabled: typeof window !== 'undefined' && !!window.supabase,
   client: null,
   _userId: null,
+  // 'signup' = email address just confirmed, 'email_change' = new email
+  // confirmed, 'recovery' = arrived here via a password-reset link.
+  justCompletedAuthRedirect: _authRedirectType,
 
   init() {
     if (!this.enabled) return;

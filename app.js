@@ -245,6 +245,7 @@ async function boot() {
   if (window.Sync && Sync.enabled) {
     try {
       const session = await Sync.getSession();
+      announceAuthRedirectIfAny(session);
       if (session) {
         STATE.authEmail = session.user.email;
         await Sync.syncOnLogin();
@@ -258,6 +259,30 @@ async function boot() {
   }
 
   await startApp();
+}
+
+// Supabase's email-confirmation and password-recovery links redirect back
+// to the app with the outcome encoded in the URL (captured by sync.js
+// before its client consumes/clears it) -- without this, someone tapping
+// "confirm your email" from their inbox just lands on the dashboard with
+// zero acknowledgment anything happened, which reads as broken even though
+// it worked. Strips the auth params from the address bar either way so a
+// refresh doesn't show a stale/duplicate message.
+function announceAuthRedirectIfAny(session) {
+  const kind = window.Sync && Sync.justCompletedAuthRedirect;
+  if (!kind) return;
+  if (window.Sync) Sync.justCompletedAuthRedirect = null;
+  if (location.hash) history.replaceState(null, '', location.pathname + location.search);
+  if (kind === 'signup' && session) {
+    showToast("Email verified — you're all set!", { type: 'success', duration: 5000 });
+  } else if (kind === 'email_change' && session) {
+    showToast('Your new email is confirmed.', { type: 'success', duration: 5000 });
+  } else if (kind === 'recovery') {
+    // No dedicated reset-password screen yet -- at minimum this keeps the
+    // "couldn't load anything" failure from happening; they can still sign
+    // in with their existing password from here, or ask for a new email.
+    showToast("You're signed in from your reset link.", { type: 'info', duration: 5000 });
+  }
 }
 
 function applyTheme(theme) {
@@ -763,12 +788,27 @@ function drawOnboarding(container, opts) {
       if (exSel) exSel.innerHTML = exerciseOptionsHtml(sel.value, null);
     });
   });
+  container.querySelectorAll('[data-role="custom-add-exercise"]').forEach((sel) => {
+    sel.addEventListener('change', () => {
+      if (sel.value !== CREATE_NEW_EXERCISE_VALUE) return;
+      const di = parseInt(sel.dataset.day, 10);
+      const muscleSel = container.querySelector(`[data-role="custom-add-muscle"][data-day="${di}"]`);
+      openCreateExerciseModal(
+        muscleSel ? muscleSel.value : null,
+        (newEx) => {
+          if (muscleSel) muscleSel.value = newEx.muscleGroup;
+          sel.innerHTML = exerciseOptionsHtml(newEx.muscleGroup, newEx.id);
+        },
+        () => { sel.value = sel.querySelector('option:not([value="' + CREATE_NEW_EXERCISE_VALUE + '"])').value; }
+      );
+    });
+  });
   container.querySelectorAll('[data-role="custom-add-exercise-btn"]').forEach((btn) => {
     btn.addEventListener('click', () => {
       const di = parseInt(btn.dataset.day, 10);
       const muscleSel = container.querySelector(`[data-role="custom-add-muscle"][data-day="${di}"]`);
       const exSel = container.querySelector(`[data-role="custom-add-exercise"][data-day="${di}"]`);
-      if (!exSel || !exSel.value) return;
+      if (!exSel || !exSel.value || exSel.value === CREATE_NEW_EXERCISE_VALUE) return;
       onboardingDraft.customDays[di].exercises.push({ exerciseId: exSel.value, muscleGroup: muscleSel.value });
       drawOnboarding(container, opts);
     });
@@ -1108,10 +1148,78 @@ async function renderLog(container) {
   drawLog(container, draft, status);
 }
 
+// Sentinel option value that means "open the create-exercise modal" rather
+// than an actual exercise id -- kept out of the real id namespace (custom
+// ids are always prefixed "custom-") so it can never collide.
+const CREATE_NEW_EXERCISE_VALUE = '__create_new__';
+
 function exerciseOptionsHtml(muscleGroup, selectedId) {
-  return combinedExercisesForMuscle(muscleGroup).map((ex) =>
+  const options = combinedExercisesForMuscle(muscleGroup).map((ex) =>
     `<option value="${ex.id}" ${ex.id === selectedId ? 'selected' : ''}>${escapeHtml(ex.name)} (${ex.equipment})</option>`
   ).join('');
+  return options + `<option value="${CREATE_NEW_EXERCISE_VALUE}">&#43; Create New Exercise&hellip;</option>`;
+}
+
+// Reusable "create a custom exercise" modal -- used from Settings' full
+// exercise-management form AND, more importantly, from every exercise
+// picker (Log screen swap/add, onboarding's custom day builder) via the
+// "+ Create New Exercise..." option every one of those dropdowns now ends
+// with. That's the point of the sentinel value above: creating an exercise
+// no longer means leaving your workout to go find it in Settings.
+function openCreateExerciseModal(defaultMuscleGroup, onCreate, onCancel) {
+  closeAnyModal();
+  const modal = document.createElement('div');
+  modal.className = 'modal-overlay';
+  modal.innerHTML = `
+    <div class="modal-card">
+      <h2>Create Exercise</h2>
+      <div class="field" style="margin-top:12px">
+        <label>Name</label>
+        <input type="text" id="quickNewExName" placeholder="e.g. Cable Chest Press">
+      </div>
+      <div class="row">
+        <div class="field" style="flex:1">
+          <label>Muscle Group</label>
+          <select id="quickNewExMuscle">${MUSCLE_GROUP_ORDER.map((m) => `<option value="${m}" ${m === defaultMuscleGroup ? 'selected' : ''}>${VOLUME_LANDMARKS[m].label}</option>`).join('')}</select>
+        </div>
+        <div class="field" style="flex:1">
+          <label>Equipment</label>
+          <select id="quickNewExEquipment">${EQUIPMENT_TYPES.map((eq) => `<option value="${eq}">${eq[0].toUpperCase() + eq.slice(1)}</option>`).join('')}</select>
+        </div>
+      </div>
+      <div class="field">
+        <label><input type="checkbox" id="quickNewExCompound" style="width:auto;margin-right:6px">Compound movement</label>
+      </div>
+      <div class="row">
+        <button type="button" class="secondary block" data-role="quick-ex-cancel">Cancel</button>
+        <button type="button" class="block" data-role="quick-ex-create">Create</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  const nameInput = modal.querySelector('#quickNewExName');
+  nameInput.focus();
+  const cancel = () => { modal.remove(); if (onCancel) onCancel(); };
+  modal.querySelector('[data-role="quick-ex-cancel"]').addEventListener('click', cancel);
+  modal.addEventListener('click', (e) => { if (e.target === modal) cancel(); });
+  modal.querySelector('[data-role="quick-ex-create"]').addEventListener('click', async () => {
+    const name = nameInput.value.trim();
+    if (!name) { openMessageModal('Give the exercise a name.'); return; }
+    const muscleGroup = modal.querySelector('#quickNewExMuscle').value;
+    const equipment = modal.querySelector('#quickNewExEquipment').value;
+    const compound = modal.querySelector('#quickNewExCompound').checked;
+    const id = 'custom-' + muscleGroup + '-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    const exercise = { id, name, muscleGroup, equipment, compound };
+    try {
+      await DB.addCustomExercise(exercise);
+      STATE.customExercises = await DB.getAllCustomExercises();
+      modal.remove();
+      showToast(`"${name}" added to your exercise library.`, { type: 'success' });
+      onCreate(exercise);
+    } catch (err) {
+      console.error('Failed to add exercise', err);
+      showToast('Could not save that exercise — please try again.', { type: 'error' });
+    }
+  });
 }
 
 // Which sets currently have their tempo/notes row expanded. Keyed by
@@ -1279,25 +1387,40 @@ function drawLog(container, draft, status) {
     const signalClass = suggestion.signal === 'up' ? 'status-mav' : suggestion.signal === 'down' ? 'status-serious' : 'status-warning';
     const signalIcon = suggestion.signal === 'up' ? '&#9650;' : suggestion.signal === 'down' ? '&#9660;' : '&#9679;';
 
+    // Last time's numbers for this exercise, shown as grayed-out placeholder
+    // text in each empty cell -- a glance at what you did before without it
+    // being a real value you'd have to clear out to log something different.
+    // Warm-ups don't count toward the alignment: lastLoggedSetsForExercise
+    // already strips them from the prior session, so we track working-set
+    // position separately here rather than using the raw set index, or a
+    // warm-up set today would misalign against a working set from last time.
+    const lastLog = lastLoggedSetsForExercise(priorSessions, entry.exerciseId);
+    let workingSetIndex = 0;
+
     const setsRows = entry.sets.map((set, si) => {
       const hasReps = set.reps !== '' && set.reps !== null && set.reps !== undefined;
       const key = `${ei}:${si}`;
       const expanded = expandedNotes.has(key);
       const hasExtra = (set.tempo && set.tempo !== '') || (set.notes && set.notes !== '') || set.warmup;
+      const lastSet = (!set.warmup && lastLog) ? lastLog.sets[workingSetIndex] : null;
+      if (!set.warmup) workingSetIndex++;
+      const weightPlaceholder = lastSet && lastSet.weight !== '' && lastSet.weight !== null && lastSet.weight !== undefined ? escapeHtml(String(lastSet.weight)) : '&mdash;';
+      const repsPlaceholder = lastSet && lastSet.reps !== '' && lastSet.reps !== null && lastSet.reps !== undefined ? escapeHtml(String(lastSet.reps)) : '&mdash;';
+      const rirPlaceholder = lastSet && lastSet.rir !== '' && lastSet.rir !== null && lastSet.rir !== undefined ? escapeHtml(String(lastSet.rir)) : '&mdash;';
       return `
       <div class="set-row ${set.warmup ? 'is-warmup' : ''}">
         <div class="set-num">${set.warmup ? 'W' : si + 1}</div>
         <div class="set-field">
           <span class="field-label">${escapeHtml(STATE.settings.units)}</span>
-          <input class="cell-input" inputmode="decimal" placeholder="&mdash;" data-entry="${ei}" data-set="${si}" data-field="weight" value="${escapeHtml(set.weight)}">
+          <input class="cell-input" inputmode="decimal" placeholder="${weightPlaceholder}" data-entry="${ei}" data-set="${si}" data-field="weight" value="${escapeHtml(set.weight)}">
         </div>
         <div class="set-field">
           <span class="field-label">Reps</span>
-          <input class="cell-input" inputmode="numeric" placeholder="&mdash;" data-entry="${ei}" data-set="${si}" data-field="reps" value="${escapeHtml(set.reps)}">
+          <input class="cell-input" inputmode="numeric" placeholder="${repsPlaceholder}" data-entry="${ei}" data-set="${si}" data-field="reps" value="${escapeHtml(set.reps)}">
         </div>
         <div class="set-field">
           <span class="field-label">RIR</span>
-          <input class="cell-input" inputmode="numeric" placeholder="&mdash;" data-entry="${ei}" data-set="${si}" data-field="rir" value="${escapeHtml(set.rir)}">
+          <input class="cell-input" inputmode="numeric" placeholder="${rirPlaceholder}" data-entry="${ei}" data-set="${si}" data-field="rir" value="${escapeHtml(set.rir)}">
         </div>
         <button type="button" class="set-check ${set.done ? 'done' : ''}" data-role="toggle-set-done" data-entry="${ei}" data-set="${si}" ${!hasReps ? 'disabled' : ''} aria-label="${set.done ? 'Mark set incomplete' : 'Mark set complete'}">&#10003;</button>
         <button type="button" class="set-more-btn ${hasExtra ? 'has-content' : ''}" data-role="toggle-notes" data-entry="${ei}" data-set="${si}" aria-label="Tempo, notes, and warm-up">&#8942;</button>
@@ -1462,6 +1585,19 @@ function wireLogEvents(container, draft) {
   container.querySelectorAll('[data-role="swap-exercise"]').forEach((sel) => {
     sel.addEventListener('change', () => {
       const ei = parseInt(sel.dataset.entry, 10);
+      if (sel.value === CREATE_NEW_EXERCISE_VALUE) {
+        const previousId = draft.entries[ei].exerciseId;
+        openCreateExerciseModal(
+          draft.entries[ei].muscleGroup,
+          (newEx) => {
+            draft.entries[ei].exerciseId = newEx.id;
+            scheduleSave();
+            drawLog(container, draft, mesoStatus(STATE.meso, STATE.sessions));
+          },
+          () => { sel.value = previousId; }
+        );
+        return;
+      }
       draft.entries[ei].exerciseId = sel.value;
       scheduleSave();
       drawLog(container, draft, mesoStatus(STATE.meso, STATE.sessions));
@@ -1614,12 +1750,25 @@ function wireLogEvents(container, draft) {
       addExerciseSelect.innerHTML = exerciseOptionsHtml(addMuscleSelect.value, null);
     });
   }
+  if (addExerciseSelect) {
+    addExerciseSelect.addEventListener('change', () => {
+      if (addExerciseSelect.value !== CREATE_NEW_EXERCISE_VALUE) return;
+      openCreateExerciseModal(
+        addMuscleSelect ? addMuscleSelect.value : null,
+        (newEx) => {
+          if (addMuscleSelect) addMuscleSelect.value = newEx.muscleGroup;
+          addExerciseSelect.innerHTML = exerciseOptionsHtml(newEx.muscleGroup, newEx.id);
+        },
+        () => { addExerciseSelect.value = addExerciseSelect.querySelector('option:not([value="' + CREATE_NEW_EXERCISE_VALUE + '"])').value; }
+      );
+    });
+  }
   const addExerciseBtn = container.querySelector('[data-role="add-exercise"]');
   if (addExerciseBtn) {
     addExerciseBtn.addEventListener('click', () => {
       const muscleGroup = addMuscleSelect.value;
       const exerciseId = addExerciseSelect.value;
-      if (!exerciseId) return;
+      if (!exerciseId || exerciseId === CREATE_NEW_EXERCISE_VALUE) return;
       draft.entries.push({
         exerciseId, muscleGroup, targetSets: 2,
         sets: Array.from({ length: 2 }, () => ({ weight: '', reps: '', rir: '', tempo: '', notes: '', done: false, warmup: false })),
