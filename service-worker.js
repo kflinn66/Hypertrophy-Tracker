@@ -1,5 +1,5 @@
 // Bump this on every deploy so phones pick up the new version.
-const CACHE_VERSION = 'hypertrack-v7';
+const CACHE_VERSION = 'hypertrack-v8';
 const CORE_ASSETS = [
   './',
   './index.html',

@@ -275,6 +275,8 @@ html, body {
   color: var(--text-secondary);
 }
 .badge.deload { background: rgba(236,131,90,0.18); color: var(--serious); }
+.badge.hiit { background: rgba(236,131,90,0.18); color: var(--serious); margin-left: 4px; }
+.badge.steady { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); margin-left: 4px; }
 
 /* ---------------- Stat tiles ---------------- */
 .stat-row { display: flex; gap: 8px; margin-bottom: 14px; }

@@ -12,6 +12,30 @@ const STATE = {
 
 const TIMER = { remaining: 105, running: false, intervalId: null, total: 105, activeEntryIndex: null };
 
+// Cardio logging -- separate from the strength `entries` array on a session
+// (sets/reps/weight/progression don't apply here). Kept as its own array on
+// the same session record so it rides along with the existing autosave,
+// backup/export, and sync pipeline for free rather than needing a new store.
+const CARDIO_TYPES = [
+  { id: 'running', label: 'Running' },
+  { id: 'cycling', label: 'Cycling' },
+  { id: 'rowing', label: 'Rowing' },
+  { id: 'elliptical', label: 'Elliptical' },
+  { id: 'stairmaster', label: 'StairMaster / Stepper' },
+  { id: 'swimming', label: 'Swimming' },
+  { id: 'walking', label: 'Walking / Incline Walk' },
+  { id: 'jump_rope', label: 'Jump Rope' },
+  { id: 'sled', label: 'Sled Push/Pull' },
+  { id: 'hiking', label: 'Hiking' },
+  { id: 'other', label: 'Other' }
+];
+const CARDIO_TYPE_LABELS = Object.fromEntries(CARDIO_TYPES.map((c) => [c.id, c.label]));
+const CARDIO_MODES = [
+  { id: 'steady', label: 'Steady-State' },
+  { id: 'hiit', label: 'HIIT' }
+];
+const CARDIO_MODE_LABELS = Object.fromEntries(CARDIO_MODES.map((c) => [c.id, c.label]));
+
 // ---------------------------------------------------------------------------
 // Toasts, confirm/message modals, save indicator, update banner
 // ---------------------------------------------------------------------------
@@ -1012,6 +1036,32 @@ function computeLifetimeStats(sessions) {
   };
 }
 
+// Rolling 7-day cardio summary for the Progress tab's Cardio card. Pulls
+// from every session's `cardio` array (completed or not -- today's
+// in-progress draft still counts toward "this week" as soon as it's saved)
+// rather than only completed sessions, since cardio isn't gated behind
+// finishing a lifting workout the way sets/volume are.
+function computeCardioWeekSummary(sessions) {
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - 7);
+  let sessionCount = 0;
+  let totalMinutes = 0;
+  const byType = {};
+  let hiitCount = 0;
+  sessions.forEach((s) => {
+    if (new Date(s.date) < cutoff) return;
+    (s.cardio || []).forEach((c) => {
+      sessionCount++;
+      const min = parseFloat(c.durationMin);
+      if (isFinite(min) && min > 0) totalMinutes += min;
+      if (c.mode === 'hiit') hiitCount++;
+      const label = CARDIO_TYPE_LABELS[c.type] || c.type || 'Cardio';
+      byType[label] = (byType[label] || 0) + 1;
+    });
+  });
+  return { sessionCount, totalMinutes: Math.round(totalMinutes), hiitCount, byType };
+}
+
 // Grid of the last `weeks` Monday-Sunday weeks (columns, oldest first) for
 // the Training Consistency heatmap -- binary trained/not-trained per day
 // (this app is built around at most one workout a day, so a volume-shaded
@@ -1811,6 +1861,7 @@ async function ensureDraft() {
     dayLabel: day.dayLabel,
     isDeload: status.isDeload,
     entries,
+    cardio: [],
     muscleFeedback: {},
     completed: false
   };
@@ -2069,6 +2120,139 @@ function openMuscleCheckinModal(draft, muscleGroup, container, onClose) {
   modal.addEventListener('click', (e) => { if (e.target === modal) finish(); });
 }
 
+// Renders the Cardio card on the Log screen -- a short list of whatever's
+// already been logged today (each row deletable) plus a button that opens
+// openLogCardioModal to add another. `draft.cardio` may be missing on
+// sessions logged before this feature existed, hence the `|| []` throughout.
+function cardioCardHtml(draft) {
+  const cardio = draft.cardio || [];
+  const rows = cardio.map((c, ci) => {
+    const typeLabel = escapeHtml(CARDIO_TYPE_LABELS[c.type] || c.type || 'Cardio');
+    const modeLabel = CARDIO_MODE_LABELS[c.mode];
+    const bits = [];
+    if (c.durationMin) bits.push(`${escapeHtml(String(c.durationMin))} min`);
+    if (c.distance) bits.push(`${escapeHtml(String(c.distance))}${escapeHtml(c.distanceUnit || '')}`);
+    if (c.avgHeartRate) bits.push(`${escapeHtml(String(c.avgHeartRate))} bpm avg`);
+    if (c.calories) bits.push(`${escapeHtml(String(c.calories))} kcal`);
+    if (c.rpe) bits.push(`RPE ${escapeHtml(String(c.rpe))}`);
+    return `<div class="list-row">
+      <span class="secondary">${typeLabel}${modeLabel ? ` <span class="badge ${escapeHtml(c.mode)}">${escapeHtml(modeLabel)}</span>` : ''}</span>
+      <div class="row" style="gap:8px">
+        <span class="trailing small muted">${bits.join(' &middot; ') || '&mdash;'}</span>
+        <button type="button" class="ghost small" data-role="delete-cardio" data-index="${ci}" aria-label="Delete cardio entry">&times;</button>
+      </div>
+    </div>`;
+  }).join('');
+
+  return `
+    <div class="card">
+      <h2>Cardio</h2>
+      ${rows || '<p class="small muted" style="margin-top:-6px">No cardio logged yet today.</p>'}
+      <button type="button" class="secondary block" style="margin-top:10px" data-role="add-cardio">+ Log Cardio</button>
+    </div>
+  `;
+}
+
+// Add-cardio modal -- duration is the only required field; everything else
+// (distance, heart rate, calories, RPE, notes) is optional so a quick "20 min
+// steady jog" entry takes two taps, while someone who tracks more can fill it
+// all in. New entries always append; there's no in-place edit, just delete +
+// re-add, which keeps this modal (and its wiring) simple.
+function openLogCardioModal(draft, container) {
+  closeAnyModal();
+  const units = STATE.settings.units;
+  const defaultDistanceUnit = units === 'kg' ? 'km' : 'mi';
+  const modal = document.createElement('div');
+  modal.className = 'modal-overlay';
+  modal.innerHTML = `
+    <div class="modal-card">
+      <h2>Log Cardio</h2>
+      <div class="row">
+        <div class="field" style="flex:1">
+          <label>Type</label>
+          <select id="cardioType">${CARDIO_TYPES.map((t) => `<option value="${t.id}">${escapeHtml(t.label)}</option>`).join('')}</select>
+        </div>
+        <div class="field" style="flex:1">
+          <label>Mode</label>
+          <select id="cardioMode">${CARDIO_MODES.map((m) => `<option value="${m.id}">${escapeHtml(m.label)}</option>`).join('')}</select>
+        </div>
+      </div>
+      <div class="field">
+        <label>Duration (minutes)</label>
+        <input type="number" id="cardioDuration" min="0" step="1" inputmode="numeric" placeholder="e.g. 30">
+        <p class="small" style="color:var(--critical);margin:4px 0 0;display:none" id="cardioDurationError">Enter how many minutes you did cardio for.</p>
+      </div>
+      <div class="row">
+        <div class="field" style="flex:1">
+          <label>Distance (optional)</label>
+          <input type="number" id="cardioDistance" min="0" step="0.01" inputmode="decimal" placeholder="e.g. 3.1">
+        </div>
+        <div class="field" style="flex:1">
+          <label>Unit</label>
+          <select id="cardioDistanceUnit">
+            <option value="mi" ${defaultDistanceUnit === 'mi' ? 'selected' : ''}>mi</option>
+            <option value="km" ${defaultDistanceUnit === 'km' ? 'selected' : ''}>km</option>
+            <option value="m">m</option>
+            <option value="yd">yd</option>
+          </select>
+        </div>
+      </div>
+      <div class="row">
+        <div class="field" style="flex:1">
+          <label>Avg heart rate (optional)</label>
+          <input type="number" id="cardioHr" min="0" step="1" inputmode="numeric" placeholder="bpm">
+        </div>
+        <div class="field" style="flex:1">
+          <label>Calories (optional)</label>
+          <input type="number" id="cardioCal" min="0" step="1" inputmode="numeric" placeholder="kcal">
+        </div>
+      </div>
+      <div class="field">
+        <label>Perceived effort, RPE 1&ndash;10 (optional)</label>
+        <input type="number" id="cardioRpe" min="1" max="10" step="1" inputmode="numeric" placeholder="e.g. 7">
+      </div>
+      <div class="field">
+        <label>Notes (optional)</label>
+        <input type="text" id="cardioNotes" placeholder="e.g. hill intervals, felt strong">
+      </div>
+      <div class="row">
+        <button type="button" class="secondary block" data-role="cardio-cancel">Cancel</button>
+        <button type="button" class="block" data-role="cardio-save">Save</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  modal.querySelector('#cardioDuration').focus();
+  const cancel = () => modal.remove();
+  modal.querySelector('[data-role="cardio-cancel"]').addEventListener('click', cancel);
+  modal.addEventListener('click', (e) => { if (e.target === modal) cancel(); });
+  modal.querySelector('[data-role="cardio-save"]').addEventListener('click', () => {
+    const duration = modal.querySelector('#cardioDuration').value;
+    const durationError = modal.querySelector('#cardioDurationError');
+    if (duration === '' || !isFinite(parseFloat(duration)) || parseFloat(duration) <= 0) {
+      durationError.style.display = 'block';
+      return;
+    }
+    durationError.style.display = 'none';
+    const entry = {
+      type: modal.querySelector('#cardioType').value,
+      mode: modal.querySelector('#cardioMode').value,
+      durationMin: duration,
+      distance: modal.querySelector('#cardioDistance').value,
+      distanceUnit: modal.querySelector('#cardioDistanceUnit').value,
+      avgHeartRate: modal.querySelector('#cardioHr').value,
+      calories: modal.querySelector('#cardioCal').value,
+      rpe: modal.querySelector('#cardioRpe').value,
+      notes: modal.querySelector('#cardioNotes').value.trim()
+    };
+    if (!draft.cardio) draft.cardio = [];
+    draft.cardio.push(entry);
+    modal.remove();
+    scheduleSave();
+    drawLog(container, draft, mesoStatus(STATE.meso, STATE.sessions));
+    showToast('Cardio logged.', { type: 'success' });
+  });
+}
+
 function drawLog(container, draft, status) {
   if (expandedNotesDraftId !== draft.id) { expandedNotes = new Set(); expandedNotesDraftId = draft.id; }
   const priorSessions = STATE.sessions.filter((s) => s.completed && s.id !== draft.id);
@@ -2168,7 +2352,7 @@ function drawLog(container, draft, status) {
           <div class="ex-footer-actions">
             <button type="button" class="secondary small" data-role="add-set" data-entry="${ei}">+ Add Set</button>
             <button type="button" class="secondary small" data-role="open-warmup-calc" data-entry="${ei}">Warm-up</button>
-            ${nextEntry ? `<button type="button" class="secondary small" data-role="toggle-superset-link" data-entry="${ei}">${isLinkedToNext ? 'Unlink Next' : '&#128279; Link Next'}</button>` : ''}
+            ${nextEntry ? `<button type="button" class="secondary small" data-role="toggle-superset-link" data-entry="${ei}">${isLinkedToNext ? 'Unlink Superset' : '&#128279; Make Superset'}</button>` : ''}
           </div>
           <button type="button" class="ex-timer-badge" data-role="ex-timer-badge" data-entry="${ei}" style="display:${(TIMER.running && TIMER.activeEntryIndex === ei) ? 'inline-flex' : 'none'}" aria-label="Rest timer, tap to cancel">
             <span class="ex-timer-icon">&#9201;</span><span class="ex-timer-time" data-role="ex-timer-time">${formatTime(TIMER.remaining)}</span>
@@ -2250,6 +2434,8 @@ function drawLog(container, draft, status) {
       </div>
       <button type="button" class="secondary block" data-role="add-exercise">+ Add to Workout</button>
     </div>
+
+    ${cardioCardHtml(draft)}
 
     <button class="block" data-role="finish-workout">Finish Workout</button>
     <button class="block secondary" style="margin-top:8px" data-role="discard-workout">Discard Workout</button>
@@ -2361,6 +2547,18 @@ function wireLogEvents(container, draft) {
     btn.addEventListener('click', () => {
       const ei = parseInt(btn.dataset.entry, 10);
       openWarmupCalcModal(draft.entries[ei], ei, container, draft);
+    });
+  });
+
+  const addCardioBtn = container.querySelector('[data-role="add-cardio"]');
+  if (addCardioBtn) addCardioBtn.addEventListener('click', () => openLogCardioModal(draft, container));
+
+  container.querySelectorAll('[data-role="delete-cardio"]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const ci = parseInt(btn.dataset.index, 10);
+      draft.cardio.splice(ci, 1);
+      scheduleSave();
+      drawLog(container, draft, mesoStatus(STATE.meso, STATE.sessions));
     });
   });
 
@@ -2828,6 +3026,8 @@ function drawProgress(container, selectedExerciseId) {
   const lifetime = computeLifetimeStats(STATE.sessions);
   const CONSISTENCY_WEEKS = 18;
   const consistencyGrid = computeConsistencyGrid(STATE.sessions, CONSISTENCY_WEEKS);
+  const cardioWeek = computeCardioWeekSummary(STATE.sessions);
+  const cardioTypeBits = Object.entries(cardioWeek.byType).map(([label, n]) => `${escapeHtml(label)} &times;${n}`).join(', ');
 
   const body = `
     <div class="card">
@@ -2841,6 +3041,16 @@ function drawProgress(container, selectedExerciseId) {
         <div class="stat-tile"><div class="val">${Math.round(lifetime.totalVolume).toLocaleString()}</div><div class="lbl">${escapeHtml(STATE.settings.units)} Lifted</div></div>
         <div class="stat-tile"><div class="val">${lifetime.longestStreak}</div><div class="lbl">Best Streak (wks)</div></div>
       </div>` : emptyState('Log your first workout to start building lifetime stats.')}
+    </div>
+    <div class="card">
+      <h2>Cardio, Last 7 Days</h2>
+      ${cardioWeek.sessionCount ? `
+      <div class="stat-row" style="margin-bottom:0">
+        <div class="stat-tile"><div class="val">${cardioWeek.sessionCount}</div><div class="lbl">Sessions</div></div>
+        <div class="stat-tile"><div class="val">${cardioWeek.totalMinutes}</div><div class="lbl">Minutes</div></div>
+        <div class="stat-tile"><div class="val">${cardioWeek.hiitCount}</div><div class="lbl">HIIT</div></div>
+      </div>
+      ${cardioTypeBits ? `<p class="small muted" style="margin:10px 0 0">${cardioTypeBits}</p>` : ''}` : emptyState('No cardio logged in the last 7 days.')}
     </div>
     <div class="card">
       <h2>Training Consistency</h2>
@@ -2992,7 +3202,14 @@ function csvEscape(value) {
 }
 
 function buildWorkoutCsv(sessions) {
-  const headers = ['Date', 'Day', 'Exercise', 'Muscle Group', 'Set', 'Warmup', 'Weight', 'Reps', 'RIR', 'Tempo', 'Notes'];
+  // Strength-set rows and cardio rows share one sheet -- cardio rows leave
+  // the strength-only columns (Set/Warmup/Weight/Reps/RIR/Tempo) blank and
+  // the strength rows leave the cardio-only columns blank, so both fit
+  // through a single, easy-to-filter-in-Excel table rather than two exports.
+  const headers = [
+    'Date', 'Day', 'Exercise', 'Muscle Group', 'Set', 'Warmup', 'Weight', 'Reps', 'RIR', 'Tempo',
+    'Cardio Mode', 'Duration (min)', 'Distance', 'Avg HR', 'Calories', 'RPE', 'Notes'
+  ];
   const rows = [headers];
   completedSessions(sessions)
     .slice()
@@ -3009,9 +3226,20 @@ function buildWorkoutCsv(sessions) {
           rows.push([
             dateStr, session.dayLabel || '', exName, muscleLabel,
             set.warmup ? 'W' : String(workingIndex), set.warmup ? 'Yes' : 'No',
-            set.weight, set.reps, set.rir, set.tempo || '', set.notes || ''
+            set.weight, set.reps, set.rir, set.tempo || '',
+            '', '', '', '', '', '', set.notes || ''
           ]);
         });
+      });
+      (session.cardio || []).forEach((c) => {
+        const typeLabel = CARDIO_TYPE_LABELS[c.type] || c.type || 'Cardio';
+        const modeLabel = CARDIO_MODE_LABELS[c.mode] || '';
+        rows.push([
+          dateStr, session.dayLabel || '', typeLabel, 'Cardio',
+          '', '', '', '', '', '',
+          modeLabel, c.durationMin || '', c.distance ? `${c.distance}${c.distanceUnit || ''}` : '',
+          c.avgHeartRate || '', c.calories || '', c.rpe || '', c.notes || ''
+        ]);
       });
     });
   return rows.map((r) => r.map(csvEscape).join(',')).join('\r\n');
