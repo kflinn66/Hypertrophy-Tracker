@@ -38,6 +38,37 @@ function showToast(message, opts) {
   }, opts.duration || 3200);
 }
 
+// Invite-a-friend: use the native OS share sheet where available (mobile
+// Safari/Chrome), falling back to copying the link to the clipboard on
+// desktop browsers that don't implement the Web Share API.
+const APP_SHARE_URL = 'https://kflinn66.github.io/Hypertrophy-Tracker/';
+async function shareApp() {
+  const shareData = {
+    title: 'HyperTrack',
+    text: 'I’ve been using HyperTrack to plan and log my workouts — thought you might like it too.',
+    url: APP_SHARE_URL
+  };
+  if (navigator.share) {
+    try {
+      await navigator.share(shareData);
+    } catch (err) {
+      // AbortError just means the user closed the share sheet -- not a failure.
+      if (err && err.name !== 'AbortError') {
+        console.error('navigator.share failed', err);
+        showToast('Could not open the share sheet.', { type: 'error' });
+      }
+    }
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(APP_SHARE_URL);
+    showToast('Link copied — paste it to a friend!', { type: 'success' });
+  } catch (err) {
+    console.error('Clipboard copy failed', err);
+    showToast(APP_SHARE_URL, { type: 'info', duration: 8000 });
+  }
+}
+
 // Generic replacements for the native confirm()/alert() -- same modal
 // look-and-feel as the exercise/muscle check-in popups so a destructive
 // action doesn't suddenly pop an unstyled browser dialog.
@@ -76,6 +107,87 @@ function openMessageModal(message, opts) {
   const cleanup = () => { modal.remove(); if (opts.onClose) opts.onClose(); };
   modal.querySelector('[data-role="modal-ok"]').addEventListener('click', cleanup);
   modal.addEventListener('click', (e) => { if (e.target === modal) cleanup(); });
+}
+
+// ---------------------------------------------------------------------------
+// First-time walkthrough -- a short, skippable slideshow that runs once
+// right after someone finishes onboarding. Plenty of people land here with
+// no idea what "MEV" means, so this exists to translate the jargon into
+// plain language before it shows up unexplained on the dashboard. Available
+// again anytime from Settings ("Replay App Tour") in case someone skipped it
+// or just wants a refresher.
+// ---------------------------------------------------------------------------
+const WALKTHROUGH_STEPS = [
+  {
+    title: 'Welcome to HyperTrack',
+    body: "HyperTrack plans your workouts, logs every set, and tells you whether you're training enough — or too much — to actually grow. No spreadsheet required."
+  },
+  {
+    title: 'MEV, MAV, MRV — Volume Landmarks',
+    body: "Your dashboard tracks each muscle's weekly sets against three landmarks:<br><br>" +
+      "<strong>MEV</strong> (Minimum Effective Volume) &mdash; the least volume that still grows a muscle.<br>" +
+      "<strong>MAV</strong> (Maximum Adaptive Volume) &mdash; your sweet spot for the most growth.<br>" +
+      "<strong>MRV</strong> (Maximum Recoverable Volume) &mdash; the ceiling where more sets stop helping and just add fatigue.<br><br>" +
+      "The bars on your dashboard show exactly where each muscle group lands every week."
+  },
+  {
+    title: 'RIR — Reps in Reserve',
+    body: "RIR is how many more reps you could have done before hitting failure. Stopping a set at RIR 2 means you left 2 good reps in the tank.<br><br>" +
+      "Logging RIR after each set is how HyperTrack decides whether to bump your weight next time, hold steady, or back off."
+  },
+  {
+    title: "You're Ready",
+    body: "Start your first workout whenever you're ready. You can change your plan, add exercises, or adjust settings anytime &mdash; everything saves automatically as you go."
+  }
+];
+
+function openWalkthroughModal(opts) {
+  opts = opts || {};
+  closeAnyModal();
+  let step = 0;
+  const modal = document.createElement('div');
+  modal.className = 'modal-overlay';
+  document.body.appendChild(modal);
+
+  const finish = async () => {
+    modal.remove();
+    if (!opts.replay) {
+      try {
+        await DB.saveSettings({ walkthroughSeen: true });
+        STATE.settings = await DB.getSettings();
+      } catch (err) {
+        console.error('Failed to save walkthrough-seen flag', err);
+      }
+    }
+    if (opts.onDone) opts.onDone();
+  };
+
+  const render = () => {
+    const s = WALKTHROUGH_STEPS[step];
+    const isLast = step === WALKTHROUGH_STEPS.length - 1;
+    const dots = WALKTHROUGH_STEPS.map((_, i) => `<span class="walkthrough-dot ${i === step ? 'active' : ''}"></span>`).join('');
+    modal.innerHTML = `
+      <div class="modal-card">
+        <h2 style="font-size:17px;text-transform:none;letter-spacing:0;color:var(--text);margin:0 0 10px">${escapeHtml(s.title)}</h2>
+        <p style="margin:0 0 18px;font-size:14px;line-height:1.5;color:var(--text-secondary,var(--muted))">${s.body}</p>
+        <div class="walkthrough-dots">${dots}</div>
+        <div class="row" style="margin-top:16px">
+          ${step > 0 ? `<button type="button" class="secondary block" data-role="wt-back">Back</button>` : `<button type="button" class="secondary block" data-role="wt-skip">Skip</button>`}
+          <button type="button" class="block" data-role="wt-next">${isLast ? "Let's Go" : 'Next'}</button>
+        </div>
+      </div>`;
+    const backBtn = modal.querySelector('[data-role="wt-back"]');
+    if (backBtn) backBtn.addEventListener('click', () => { step -= 1; render(); });
+    const skipBtn = modal.querySelector('[data-role="wt-skip"]');
+    if (skipBtn) skipBtn.addEventListener('click', finish);
+    modal.querySelector('[data-role="wt-next"]').addEventListener('click', () => {
+      if (isLast) { finish(); return; }
+      step += 1;
+      render();
+    });
+  };
+  render();
+  modal.addEventListener('click', (e) => { if (e.target === modal) finish(); });
 }
 
 // Tiny "Saving…/Saved/Save failed" label rendered next to the workout date
@@ -880,8 +992,10 @@ async function completeOnboarding() {
     STATE.sessions = await DB.getAllSessions();
     STATE.draft = null;
     onboardingDraft = null;
+    const showWalkthrough = !STATE.settings.walkthroughSeen;
     goTo('dashboard');
     renderRoute();
+    if (showWalkthrough) openWalkthroughModal();
   } catch (err) {
     console.error('Failed to save your plan', err);
     showToast('Could not save your plan — please try again.', { type: 'error', duration: 5000 });
@@ -2208,6 +2322,18 @@ function renderSettings(container) {
   const body = `
     ${accountCard}
     <div class="card">
+      <h2>Share HyperTrack</h2>
+      <p class="small muted" style="margin-top:-4px">Know someone who'd like a free, no-nonsense hypertrophy tracker? Send them the link.</p>
+      <button type="button" class="block" data-role="share-app">&#128228; Invite a Friend</button>
+    </div>
+
+    <div class="card">
+      <h2>Help</h2>
+      <p class="small muted" style="margin-top:-4px">New to terms like MEV or RIR? Take the quick tour again.</p>
+      <button type="button" class="secondary block" data-role="replay-walkthrough">Replay App Tour</button>
+    </div>
+
+    <div class="card">
       <h2>Appearance</h2>
       <div class="theme-toggle" id="themeToggle" role="group" aria-label="Theme">
         <button type="button" class="theme-toggle-btn ${currentTheme === 'dark' ? 'active' : ''}" data-theme-value="dark">Dark</button>
@@ -2323,6 +2449,12 @@ function renderSettings(container) {
   `;
 
   container.innerHTML = appShell(body, 'settings', 'Settings', '');
+
+  const shareBtn = container.querySelector('[data-role="share-app"]');
+  if (shareBtn) shareBtn.addEventListener('click', shareApp);
+
+  const replayBtn = container.querySelector('[data-role="replay-walkthrough"]');
+  if (replayBtn) replayBtn.addEventListener('click', () => openWalkthroughModal({ replay: true }));
 
   container.querySelectorAll('#themeToggle .theme-toggle-btn').forEach(btn => {
     btn.addEventListener('click', async () => {
