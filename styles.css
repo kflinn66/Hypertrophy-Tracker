@@ -124,10 +124,25 @@ html, body {
   position: sticky;
   top: 0;
   z-index: 10;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
   background: var(--page);
+}
+/* The bar itself stays full-width (so its background covers edge-to-edge
+   behind the sticky header on wide windows), and the title/button row is
+   capped to the same column as .view below it. The feedback button sits
+   directly beside the title (no space-between/flex-grow pushing it to the
+   row's far edge) so it never competes for the top-right corner that
+   #installBtn already owns -- `justify-content: space-between` here would
+   put it flush against the viewport edge on both narrow phones (colliding
+   with #installBtn whenever a PWA install prompt is showing) and, at a
+   different edge, on wide desktop windows. Same collision history as the
+   old bottom-right FAB, just found by testing edges instead of assuming
+   the corner was free. */
+.appbar-inner {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  max-width: 560px;
+  margin: 0 auto;
 }
 .appbar h1 {
   font-size: 22px;

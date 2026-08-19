@@ -524,11 +524,13 @@ function goTo(route) { location.hash = '#/' + route; }
 function appShell(bodyHtml, activeRoute, title, subtitle) {
   return `
     <div class="appbar">
-      <div>
-        <h1>${escapeHtml(title)}</h1>
-        ${subtitle ? `<div class="subtitle">${escapeHtml(subtitle)}</div>` : ''}
+      <div class="appbar-inner">
+        <div>
+          <h1>${escapeHtml(title)}</h1>
+          ${subtitle ? `<div class="subtitle">${escapeHtml(subtitle)}</div>` : ''}
+        </div>
+        ${STATE.settings.onboarded ? `<button type="button" class="feedback-btn" data-role="open-feedback" aria-label="Send Feedback" title="Send Feedback"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></button>` : ''}
       </div>
-      ${STATE.settings.onboarded ? `<button type="button" class="feedback-btn" data-role="open-feedback" aria-label="Send Feedback" title="Send Feedback"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></button>` : ''}
     </div>
     <div class="view">${bodyHtml}</div>
     ${STATE.settings.onboarded ? bottomNavHtml(activeRoute) : ''}
