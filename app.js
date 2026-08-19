@@ -1035,9 +1035,22 @@ function renderDashboard(container) {
 
     const muscleKeys = MUSCLE_GROUP_ORDER.filter((m) => plan.weeklyTargets[m] !== undefined);
     const statuses = muscleKeys.map((m) => classifyVolume(m, volumeTotals[m] || 0));
-    const onTrackCount = statuses.filter((s) => s === 'mav').length;
     const overCount = statuses.filter((s) => s === 'over').length;
-    const overallOk = overCount === 0 && onTrackCount >= Math.ceil(muscleKeys.length / 2);
+    const underCount = statuses.filter((s) => s === 'under').length;
+    // "Check Volume" should only fire for things you can actually act on --
+    // being under MEV on a Tuesday when your week isn't over yet is normal
+    // progress, not a problem, so flagging it here was a false alarm that
+    // stayed lit almost the entire week (you only accumulate enough sets in
+    // most muscles to clear MEV partway through the week, and clearing MAV
+    // in over half your muscles at once basically never happens outside the
+    // tail end of a week). Same story for a deload week, where lower numbers
+    // are the intended target, not a shortfall -- called out below the meters
+    // too. What IS worth surfacing immediately: any muscle actually over MRV
+    // (real overreaching), or a muscle still under MEV with no training days
+    // left this week to fix it.
+    const daysCompletedThisWeek = status.currentWeekSessions.length;
+    const isFinalDayOfWeek = daysCompletedThisWeek >= STATE.meso.daysPerWeek - 1;
+    const overallOk = overCount === 0 && !(!status.isDeload && isFinalDayOfWeek && underCount > 0);
 
     const meterRows = muscleKeys.map((m) => {
       const lm = VOLUME_LANDMARKS[m];
