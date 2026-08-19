@@ -22,8 +22,11 @@ const VOLUME_LANDMARKS = {
 };
 
 // Returns 'under' | 'mev' | 'mav' | 'mrv' | 'over' for color-coding a weekly total.
-function classifyVolume(muscleGroup, weeklySets) {
-  const lm = VOLUME_LANDMARKS[muscleGroup];
+// `landmarksOverride`, if given, is a per-user retuned {mev, mavLow, mavHigh, mrv}
+// for this muscle group (see Settings > Volume Landmarks) -- falls back to the
+// stock VOLUME_LANDMARKS entry when absent.
+function classifyVolume(muscleGroup, weeklySets, landmarksOverride) {
+  const lm = landmarksOverride || VOLUME_LANDMARKS[muscleGroup];
   if (!lm) return 'under';
   if (weeklySets < lm.mev) return 'under';        // red-ish: below minimum effective
   if (weeklySets < lm.mavLow) return 'mev';        // yellow: at/above MEV, building toward MAV

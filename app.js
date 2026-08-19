@@ -6,7 +6,8 @@ const STATE = {
   meso: null,
   sessions: [],
   draft: null,
-  customExercises: []
+  customExercises: [],
+  customPlans: []
 };
 
 const TIMER = { remaining: 105, running: false, intervalId: null, total: 105, activeEntryIndex: null };
@@ -146,6 +147,222 @@ async function submitFeedback(text, category, email) {
     console.error('Feedback submission failed', err);
     showToast('Could not send feedback -- check your connection and try again.', { type: 'error' });
   }
+}
+
+// ---------------------------------------------------------------------------
+// Plate calculator -- given a target barbell weight, works out which plates
+// to load per side from a standard commercial plate set. Greedy from
+// heaviest to lightest; if the target can't be hit exactly it reports how
+// far short the closest loadable weight lands, rather than silently
+// rounding without saying so.
+// ---------------------------------------------------------------------------
+const STANDARD_PLATES_LBS = [45, 35, 25, 10, 5, 2.5];
+const STANDARD_PLATES_KG = [25, 20, 15, 10, 5, 2.5, 1.25];
+const DEFAULT_BAR_LBS = 45;
+const DEFAULT_BAR_KG = 20;
+
+function calculatePlates(targetWeight, barWeight, units) {
+  const plateSet = units === 'kg' ? STANDARD_PLATES_KG : STANDARD_PLATES_LBS;
+  const perSide = (targetWeight - barWeight) / 2;
+  if (perSide <= 0) return { perSide: Math.max(0, perSide), plates: [], shortfall: 0 };
+  const plates = [];
+  let remaining = perSide;
+  for (const plate of plateSet) {
+    let count = 0;
+    // Small epsilon so float error (e.g. 0.1 - 0.05 !== 0.05) doesn't drop a
+    // plate that should fit exactly.
+    while (remaining + 1e-6 >= plate) { remaining -= plate; count++; }
+    if (count > 0) plates.push({ plate, count });
+  }
+  return { perSide, plates, shortfall: Math.max(0, remaining) };
+}
+
+function openPlateCalculatorModal() {
+  closeAnyModal();
+  const units = STATE.settings.units;
+  const defaultBar = units === 'kg' ? DEFAULT_BAR_KG : DEFAULT_BAR_LBS;
+  const step = units === 'kg' ? 1.25 : 2.5;
+  const modal = document.createElement('div');
+  modal.className = 'modal-overlay';
+  modal.innerHTML = `
+    <div class="modal-card">
+      <h2>Plate Calculator</h2>
+      <p class="muted small">Plates needed per side of the bar, using standard gym plate sizes.</p>
+      <div class="row">
+        <div class="field" style="flex:1">
+          <label>Target weight (${escapeHtml(units)})</label>
+          <input type="number" id="pcTarget" min="0" step="${step}" inputmode="decimal" placeholder="e.g. 185">
+        </div>
+        <div class="field" style="flex:1">
+          <label>Bar weight (${escapeHtml(units)})</label>
+          <input type="number" id="pcBar" min="0" step="0.5" value="${defaultBar}" inputmode="decimal">
+        </div>
+      </div>
+      <div id="pcResult" class="plate-result"><p class="small muted">Enter a target weight to see the plate breakdown.</p></div>
+      <button type="button" class="secondary block" data-role="pc-close">Close</button>
+    </div>`;
+  document.body.appendChild(modal);
+  const targetEl = modal.querySelector('#pcTarget');
+  const barEl = modal.querySelector('#pcBar');
+  const resultEl = modal.querySelector('#pcResult');
+  const update = () => {
+    const target = parseFloat(targetEl.value);
+    const bar = parseFloat(barEl.value);
+    if (!isFinite(target) || target <= 0 || !isFinite(bar) || bar < 0) {
+      resultEl.innerHTML = `<p class="small muted">Enter a target weight to see the plate breakdown.</p>`;
+      return;
+    }
+    const result = calculatePlates(target, bar, units);
+    if (!result.plates.length) {
+      resultEl.innerHTML = `<p class="small muted">${target}${escapeHtml(units)} is at or under the bar &mdash; no plates needed.</p>`;
+      return;
+    }
+    const rows = result.plates.map((p) => `<div class="plate-row"><span class="plate-chip">${p.plate}${escapeHtml(units)}</span><span class="muted small">&times; ${p.count} per side</span></div>`).join('');
+    const shortfallNote = result.shortfall > 0.01
+      ? `<p class="small muted" style="margin-top:8px">Closest with these plates: ${(target - result.shortfall * 2).toFixed(2)}${escapeHtml(units)} (${result.shortfall.toFixed(2)}${escapeHtml(units)} short per side).</p>`
+      : '';
+    resultEl.innerHTML = `<p class="small" style="margin:10px 0 6px;font-weight:700">${result.perSide.toFixed(2)}${escapeHtml(units)} per side:</p>${rows}${shortfallNote}`;
+  };
+  targetEl.addEventListener('input', update);
+  barEl.addEventListener('input', update);
+  targetEl.focus();
+  const close = () => modal.remove();
+  modal.querySelector('[data-role="pc-close"]').addEventListener('click', close);
+  modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
+}
+
+// ---------------------------------------------------------------------------
+// Warm-up ramp calculator -- from a top working-set weight, suggests a short
+// 3-set ramp (40/60/80%) to warm up into it, rounded to the same weight
+// increments progression suggestions use (roundToStep/WEIGHT_STEP_* from
+// progression.js). "Insert Warm-up Sets" adds them to the top of the
+// exercise, flagged as warm-ups so they're excluded from volume/progression
+// like any other warm-up set.
+// ---------------------------------------------------------------------------
+const WARMUP_RAMP = [
+  { pct: 0.4, reps: 10 },
+  { pct: 0.6, reps: 6 },
+  { pct: 0.8, reps: 3 }
+];
+
+function computeWarmupRamp(workingWeight, units) {
+  const step = units === 'kg' ? WEIGHT_STEP_KG : WEIGHT_STEP_LBS;
+  return WARMUP_RAMP.map((r) => ({ weight: roundToStep(workingWeight * r.pct, step), reps: r.reps }));
+}
+
+function openWarmupCalcModal(entry, ei, container, draft) {
+  closeAnyModal();
+  const units = STATE.settings.units;
+  const ex = exerciseById(entry.exerciseId);
+  const firstWorking = entry.sets.find((s) => !s.warmup && s.weight !== '' && s.weight !== null && s.weight !== undefined);
+  const prefill = firstWorking ? firstWorking.weight : '';
+  const modal = document.createElement('div');
+  modal.className = 'modal-overlay';
+  modal.innerHTML = `
+    <div class="modal-card">
+      <h2>Warm-up Ramp</h2>
+      <p class="muted small">Suggested ramp into your working weight for ${escapeHtml(ex ? ex.name : 'this exercise')}.</p>
+      <div class="field">
+        <label>Working weight (${escapeHtml(units)})</label>
+        <input type="number" id="wuWeight" min="0" step="0.5" inputmode="decimal" placeholder="e.g. 185" value="${escapeHtml(String(prefill))}">
+      </div>
+      <div id="wuResult" class="plate-result"></div>
+      <div class="row">
+        <button type="button" class="secondary block" data-role="wu-cancel">Cancel</button>
+        <button type="button" class="block" data-role="wu-insert">Insert Warm-up Sets</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  const weightEl = modal.querySelector('#wuWeight');
+  const resultEl = modal.querySelector('#wuResult');
+  const insertBtn = modal.querySelector('[data-role="wu-insert"]');
+  const update = () => {
+    const w = parseFloat(weightEl.value);
+    if (!isFinite(w) || w <= 0) {
+      resultEl.innerHTML = `<p class="small muted">Enter your working weight to see a ramp.</p>`;
+      insertBtn.disabled = true;
+      return;
+    }
+    const ramp = computeWarmupRamp(w, units);
+    resultEl.innerHTML = ramp.map((r) => `<div class="plate-row"><span class="plate-chip">${r.weight}${escapeHtml(units)}</span><span class="muted small">&times; ${r.reps} reps</span></div>`).join('');
+    insertBtn.disabled = false;
+  };
+  weightEl.addEventListener('input', update);
+  update();
+  weightEl.focus();
+  const cancel = () => modal.remove();
+  modal.querySelector('[data-role="wu-cancel"]').addEventListener('click', cancel);
+  modal.addEventListener('click', (e) => { if (e.target === modal) cancel(); });
+  insertBtn.addEventListener('click', () => {
+    const w = parseFloat(weightEl.value);
+    if (!isFinite(w) || w <= 0) return;
+    const ramp = computeWarmupRamp(w, units);
+    const newSets = ramp.map((r) => ({ weight: String(r.weight), reps: String(r.reps), rir: '', tempo: '', notes: '', done: false, warmup: true }));
+    entry.sets.unshift(...newSets);
+    modal.remove();
+    scheduleSave();
+    drawLog(container, draft, mesoStatus(STATE.meso, STATE.sessions));
+    showToast('Warm-up sets added.', { type: 'success' });
+  });
+}
+
+// Small "name this template" prompt used by onboarding's custom day builder
+// (Save as Template). Kept generic (just a name field) since the actual
+// day/exercise data is already sitting in onboardingDraft by the time this
+// opens -- this only needs to collect what a bare prompt() would have.
+function openSaveTemplateModal(onSave) {
+  closeAnyModal();
+  const modal = document.createElement('div');
+  modal.className = 'modal-overlay';
+  modal.innerHTML = `
+    <div class="modal-card">
+      <h2>Save as Template</h2>
+      <p class="muted small">Save this training-day layout so you can reuse it for a future mesocycle.</p>
+      <div class="field">
+        <label>Template name</label>
+        <input type="text" id="tplName" placeholder="e.g. Push Pull Legs v2">
+      </div>
+      <div class="row">
+        <button type="button" class="secondary block" data-role="tpl-cancel">Cancel</button>
+        <button type="button" class="block" data-role="tpl-save">Save</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  const nameEl = modal.querySelector('#tplName');
+  nameEl.focus();
+  const cancel = () => modal.remove();
+  modal.querySelector('[data-role="tpl-cancel"]').addEventListener('click', cancel);
+  modal.addEventListener('click', (e) => { if (e.target === modal) cancel(); });
+  modal.querySelector('[data-role="tpl-save"]').addEventListener('click', () => {
+    const name = nameEl.value.trim();
+    if (!name) { openMessageModal('Give the template a name.'); return; }
+    modal.remove();
+    onSave(name);
+  });
+}
+
+// Exercise demo image -- a tap on the small thumbnail (rendered only for
+// exercises with an EXERCISE_MEDIA entry, see exercise-media.js) opens a
+// larger view. Images are hosted off the Free Exercise DB's GitHub repo
+// directly, so this needs network access; nothing here is cached for
+// offline use beyond whatever the browser's own HTTP cache already has.
+function openExerciseDemoModal(exerciseId) {
+  const url = EXERCISE_MEDIA[exerciseId];
+  if (!url) return;
+  closeAnyModal();
+  const ex = exerciseById(exerciseId);
+  const modal = document.createElement('div');
+  modal.className = 'modal-overlay';
+  modal.innerHTML = `
+    <div class="modal-card">
+      <h2>${escapeHtml(ex ? ex.name : 'Exercise')}</h2>
+      <img class="ex-demo-img" src="${url}" alt="${escapeHtml(ex ? ex.name : '')}">
+      <p class="small muted" style="margin-top:8px">Photo via the open-source Free Exercise DB (public domain).</p>
+      <button type="button" class="secondary block" data-role="demo-close" style="margin-top:10px">Close</button>
+    </div>`;
+  document.body.appendChild(modal);
+  modal.querySelector('[data-role="demo-close"]').addEventListener('click', () => modal.remove());
+  modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
 }
 
 // Generic replacements for the native confirm()/alert() -- same modal
@@ -383,6 +600,7 @@ async function startApp() {
     STATE.meso = await DB.getActiveMesocycle();
     STATE.sessions = await DB.getAllSessions();
     STATE.customExercises = await DB.getAllCustomExercises();
+    STATE.customPlans = await DB.getAllCustomPlans();
   } catch (e) {
     console.error('Failed to load app data', e);
     document.getElementById('app').innerHTML = `<div class="view"><div class="card">
@@ -404,6 +622,48 @@ async function startApp() {
   // header's feedback button keeps working across every screen for free.
   document.getElementById('app').addEventListener('click', (e) => {
     if (e.target.closest('[data-role="open-feedback"]')) openFeedbackModal();
+  });
+}
+
+// Real "set a new password" form for the Supabase recovery-link flow -- the
+// redirect from a "reset your password" email leaves you in a genuine
+// (temporary) authenticated session, so this is a normal password update,
+// not a separate token-exchange screen. Reached only from boot() when the
+// redirect's type is 'recovery'; on success it hands off to startApp() like
+// any other successful sign-in.
+function renderPasswordResetScreen() {
+  const app = document.getElementById('app');
+  app.innerHTML = `
+    <div class="appbar"><div><h1>HyperTrack</h1></div></div>
+    <div class="view" style="max-width:400px">
+      <div class="card">
+        <h2 style="font-size:16px;text-transform:none;letter-spacing:0;color:var(--text)">Set a New Password</h2>
+        <p class="small muted" style="margin-top:-4px">You're signed in from your reset link. Choose a new password to finish.</p>
+        <div class="field"><label>New Password</label><input type="password" id="newPass1" placeholder="At least 6 characters"></div>
+        <div class="field"><label>Confirm New Password</label><input type="password" id="newPass2" placeholder="Re-enter password"></div>
+        <p id="resetError" class="small" style="color:var(--critical);display:none;margin-bottom:10px"></p>
+        <button class="block" id="resetSubmitBtn">Set Password</button>
+      </div>
+    </div>`;
+  const p1 = document.getElementById('newPass1');
+  const p2 = document.getElementById('newPass2');
+  const errEl = document.getElementById('resetError');
+  const setError = (msg) => { errEl.textContent = msg; errEl.style.display = msg ? 'block' : 'none'; };
+  const btn = document.getElementById('resetSubmitBtn');
+  btn.addEventListener('click', async () => {
+    setError('');
+    if (!p1.value || p1.value.length < 6) { setError('Password must be at least 6 characters.'); return; }
+    if (p1.value !== p2.value) { setError('Passwords do not match.'); return; }
+    btn.disabled = true;
+    try {
+      await Sync.updatePassword(p1.value);
+      showToast("Password updated — you're all set.", { type: 'success', duration: 5000 });
+      await startApp();
+    } catch (err) {
+      setError(err.message || 'Could not update password.');
+    } finally {
+      btn.disabled = false;
+    }
   });
 }
 
@@ -443,6 +703,17 @@ async function boot() {
   if (window.Sync && Sync.enabled) {
     try {
       const session = await Sync.getSession();
+      // A password-recovery redirect leaves a real (temporary) session, but
+      // it should land on the "set a new password" screen, not straight
+      // through to the dashboard like a normal sign-in -- checked first and
+      // returns early so the normal session branch below never runs for it.
+      if (session && Sync.justCompletedAuthRedirect === 'recovery') {
+        Sync.justCompletedAuthRedirect = null;
+        if (location.hash) history.replaceState(null, '', location.pathname + location.search);
+        STATE.authEmail = session.user.email;
+        renderPasswordResetScreen();
+        return;
+      }
       announceAuthRedirectIfAny(session);
       if (session) {
         STATE.authEmail = session.user.email;
@@ -475,12 +746,9 @@ function announceAuthRedirectIfAny(session) {
     showToast("Email verified — you're all set!", { type: 'success', duration: 5000 });
   } else if (kind === 'email_change' && session) {
     showToast('Your new email is confirmed.', { type: 'success', duration: 5000 });
-  } else if (kind === 'recovery') {
-    // No dedicated reset-password screen yet -- at minimum this keeps the
-    // "couldn't load anything" failure from happening; they can still sign
-    // in with their existing password from here, or ask for a new email.
-    showToast("You're signed in from your reset link.", { type: 'info', duration: 5000 });
   }
+  // 'recovery' is handled earlier in boot() (renderPasswordResetScreen), so
+  // it never reaches this function with a session to acknowledge here.
 }
 
 function applyTheme(theme) {
@@ -581,6 +849,20 @@ function combinedExercisesForMuscle(muscleGroup) {
   return exercisesForMuscle(muscleGroup).concat(custom);
 }
 
+// Returns the MEV/MAV/MRV landmark object to use for a muscle group -- a
+// user's retuned numbers from Settings > Volume Landmarks if they've saved
+// one for this muscle, else the stock VOLUME_LANDMARKS default. This only
+// affects live volume classification/display (dashboard meters, "Check
+// Volume" flag); it deliberately does NOT change plan-generation-time
+// weekly targets in plans.js, which stay based on the stock landmarks.
+function effectiveLandmarks(muscleGroup) {
+  const overrides = STATE.settings && STATE.settings.volumeLandmarkOverrides;
+  if (overrides && overrides[muscleGroup]) {
+    return Object.assign({}, VOLUME_LANDMARKS[muscleGroup], overrides[muscleGroup]);
+  }
+  return VOLUME_LANDMARKS[muscleGroup];
+}
+
 // ---------------------------------------------------------------------------
 // Mesocycle status / volume math
 // ---------------------------------------------------------------------------
@@ -668,6 +950,96 @@ function computeTrainingStreak(sessions) {
     else break;
   }
   return streak;
+}
+
+// Longest run of consecutive weeks with at least one completed workout, ever
+// -- unlike computeTrainingStreak (the CURRENT still-active streak, counted
+// back from today), this looks across the full history for the lifetime
+// stats card, so a streak from months ago that later broke still shows up
+// as someone's personal best.
+function computeLongestWeeklyStreak(sessions) {
+  const completed = completedSessions(sessions).map((s) => new Date(s.date));
+  if (!completed.length) return 0;
+  const weekKey = (d) => {
+    const t = new Date(d);
+    const day = (t.getDay() + 6) % 7;
+    t.setDate(t.getDate() - day);
+    return t.toISOString().slice(0, 10);
+  };
+  const weeks = Array.from(new Set(completed.map(weekKey))).sort();
+  let longest = 0, current = 0, prevWeek = null;
+  weeks.forEach((wk) => {
+    if (prevWeek === null) {
+      current = 1;
+    } else {
+      const expectedNext = new Date(prevWeek);
+      expectedNext.setDate(expectedNext.getDate() + 7);
+      current = (wk === expectedNext.toISOString().slice(0, 10)) ? current + 1 : 1;
+    }
+    longest = Math.max(longest, current);
+    prevWeek = wk;
+  });
+  return longest;
+}
+
+// All-time totals for the Progress tab's Lifetime Stats card. Volume is
+// summed from raw logged numbers regardless of any unit change partway
+// through someone's history (this app doesn't store a per-set unit), so
+// it's labeled with whatever units are active now -- a reasonable
+// approximation given how rarely anyone actually switches lbs/kg mid-log.
+function computeLifetimeStats(sessions) {
+  const completed = completedSessions(sessions);
+  let totalSets = 0;
+  let totalVolume = 0;
+  completed.forEach((s) => {
+    (s.entries || []).forEach((entry) => {
+      (entry.sets || []).forEach((set) => {
+        if (set.warmup) return;
+        const reps = parseFloat(set.reps);
+        const weight = parseFloat(set.weight);
+        if (isFinite(reps) && reps > 0) {
+          totalSets++;
+          if (isFinite(weight) && weight > 0) totalVolume += reps * weight;
+        }
+      });
+    });
+  });
+  return {
+    totalWorkouts: completed.length,
+    totalSets,
+    totalVolume,
+    longestStreak: computeLongestWeeklyStreak(sessions)
+  };
+}
+
+// Grid of the last `weeks` Monday-Sunday weeks (columns, oldest first) for
+// the Training Consistency heatmap -- binary trained/not-trained per day
+// (this app is built around at most one workout a day, so a volume-shaded
+// gradient wouldn't add real signal over a plain dot). Days after today
+// within the current week are marked isFuture so they render as blank
+// placeholders instead of looking like missed rest days.
+function computeConsistencyGrid(sessions, weeks) {
+  const trainedDays = new Set(completedSessions(sessions).map((s) => s.date.slice(0, 10)));
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const dayOfWeek = (today.getDay() + 6) % 7; // 0 = Monday
+  const currentMonday = new Date(today);
+  currentMonday.setDate(today.getDate() - dayOfWeek);
+  const startMonday = new Date(currentMonday);
+  startMonday.setDate(currentMonday.getDate() - (weeks - 1) * 7);
+
+  const columns = [];
+  for (let w = 0; w < weeks; w++) {
+    const col = [];
+    for (let d = 0; d < 7; d++) {
+      const date = new Date(startMonday);
+      date.setDate(startMonday.getDate() + w * 7 + d);
+      const key = date.toISOString().slice(0, 10);
+      col.push({ date: key, trained: trainedDays.has(key), isFuture: date > today });
+    }
+    columns.push(col);
+  }
+  return columns;
 }
 
 // True if this set's estimated one-rep max (Epley) is the highest ever
@@ -794,7 +1166,10 @@ function customDaysBuilderHtml(customDays) {
       </div>`;
     }).join('');
     const addMuscle = day.addMuscle || MUSCLE_GROUP_ORDER[0];
+    const addEquip = day.addEquip || 'all';
     const muscleOptions = MUSCLE_GROUP_ORDER.map((m) => `<option value="${m}" ${m === addMuscle ? 'selected' : ''}>${VOLUME_LANDMARKS[m].label}</option>`).join('');
+    const equipOptions = `<option value="all" ${addEquip === 'all' ? 'selected' : ''}>All Equipment</option>` +
+      EQUIPMENT_TYPES.map((eq) => `<option value="${eq}" ${eq === addEquip ? 'selected' : ''}>${eq[0].toUpperCase() + eq.slice(1)}</option>`).join('');
 
     return `<div class="card">
       <div class="row between">
@@ -805,8 +1180,9 @@ function customDaysBuilderHtml(customDays) {
       ${exerciseRows}
       <div class="row" style="margin-top:8px">
         <select data-role="custom-add-muscle" data-day="${di}" style="flex:1">${muscleOptions}</select>
-        <select data-role="custom-add-exercise" data-day="${di}" style="flex:1">${exerciseOptionsHtml(addMuscle, null)}</select>
+        <select data-role="custom-equip-filter" data-day="${di}" style="flex:1">${equipOptions}</select>
       </div>
+      <select data-role="custom-add-exercise" data-day="${di}" style="margin-top:6px">${exerciseOptionsHtml(addMuscle, null, addEquip)}</select>
       <button type="button" class="secondary block" style="margin-top:8px" data-role="custom-add-exercise-btn" data-day="${di}">+ Add Exercise</button>
     </div>`;
   }).join('');
@@ -845,13 +1221,28 @@ function drawOnboarding(container, opts) {
       </div>
     </div>`;
 
+  const templatesCard = (isCustom && STATE.customPlans && STATE.customPlans.length) ? `
+    <div class="card">
+      <h2>Saved Templates</h2>
+      <p class="small muted" style="margin-top:-6px">Load a training-day layout you saved before, or start fresh below.</p>
+      ${STATE.customPlans.map((p) => `<div class="list-row">
+        <div class="primary">${escapeHtml(p.name)}</div>
+        <div class="row" style="gap:6px">
+          <button type="button" class="secondary small" data-role="use-template" data-id="${p.id}">Use</button>
+          <button type="button" class="ghost small" data-role="delete-template" data-id="${p.id}">Delete</button>
+        </div>
+      </div>`).join('')}
+    </div>` : '';
+
   const splitSection = isCustom
     ? `
     <div class="card">
       <h2>${num()}. Your Training Days</h2>
       <p class="small muted">Add as many days as you want, each with its own label and exercises &mdash; nothing here is locked to a fixed split.</p>
     </div>
-    ${customDaysBuilderHtml(onboardingDraft.customDays)}`
+    ${templatesCard}
+    ${customDaysBuilderHtml(onboardingDraft.customDays)}
+    <button type="button" class="block secondary" style="margin-top:8px" data-role="save-as-template">&#128190; Save as Template</button>`
     : `
     <div class="card">
       <h2>${num()}. Split Style</h2>
@@ -985,8 +1376,18 @@ function drawOnboarding(container, opts) {
     sel.addEventListener('change', () => {
       const di = parseInt(sel.dataset.day, 10);
       onboardingDraft.customDays[di].addMuscle = sel.value;
+      const equipSel = container.querySelector(`[data-role="custom-equip-filter"][data-day="${di}"]`);
       const exSel = container.querySelector(`[data-role="custom-add-exercise"][data-day="${di}"]`);
-      if (exSel) exSel.innerHTML = exerciseOptionsHtml(sel.value, null);
+      if (exSel) exSel.innerHTML = exerciseOptionsHtml(sel.value, null, equipSel ? equipSel.value : 'all');
+    });
+  });
+  container.querySelectorAll('[data-role="custom-equip-filter"]').forEach((sel) => {
+    sel.addEventListener('change', () => {
+      const di = parseInt(sel.dataset.day, 10);
+      onboardingDraft.customDays[di].addEquip = sel.value;
+      const muscleSel = container.querySelector(`[data-role="custom-add-muscle"][data-day="${di}"]`);
+      const exSel = container.querySelector(`[data-role="custom-add-exercise"][data-day="${di}"]`);
+      if (exSel) exSel.innerHTML = exerciseOptionsHtml(muscleSel ? muscleSel.value : MUSCLE_GROUP_ORDER[0], null, sel.value);
     });
   });
   container.querySelectorAll('[data-role="custom-add-exercise"]').forEach((sel) => {
@@ -994,10 +1395,13 @@ function drawOnboarding(container, opts) {
       if (sel.value !== CREATE_NEW_EXERCISE_VALUE) return;
       const di = parseInt(sel.dataset.day, 10);
       const muscleSel = container.querySelector(`[data-role="custom-add-muscle"][data-day="${di}"]`);
+      const equipSel = container.querySelector(`[data-role="custom-equip-filter"][data-day="${di}"]`);
       openCreateExerciseModal(
         muscleSel ? muscleSel.value : null,
         (newEx) => {
           if (muscleSel) muscleSel.value = newEx.muscleGroup;
+          if (equipSel) equipSel.value = 'all';
+          onboardingDraft.customDays[di].addEquip = 'all';
           sel.innerHTML = exerciseOptionsHtml(newEx.muscleGroup, newEx.id);
         },
         () => { sel.value = sel.querySelector('option:not([value="' + CREATE_NEW_EXERCISE_VALUE + '"])').value; }
@@ -1020,6 +1424,73 @@ function drawOnboarding(container, opts) {
       const exi = parseInt(btn.dataset.ex, 10);
       onboardingDraft.customDays[di].exercises.splice(exi, 1);
       drawOnboarding(container, opts);
+    });
+  });
+
+  const saveTemplateBtn = container.querySelector('[data-role="save-as-template"]');
+  if (saveTemplateBtn) {
+    saveTemplateBtn.addEventListener('click', () => {
+      const hasExercises = onboardingDraft.customDays.some((d) => d.exercises.length > 0);
+      if (!hasExercises) { openMessageModal('Add at least one exercise to a day before saving a template.'); return; }
+      openSaveTemplateModal(async (name) => {
+        // Strip UI-only fields (addMuscle/addEquip) -- a template only needs
+        // the day label + exercise list, matching buildCustomPlan's shape.
+        const customDays = onboardingDraft.customDays.map((d) => ({
+          dayLabel: d.dayLabel,
+          exercises: d.exercises.map((e) => ({ exerciseId: e.exerciseId, muscleGroup: e.muscleGroup }))
+        }));
+        try {
+          await DB.addCustomPlan({ name, customDays, createdAt: new Date().toISOString() });
+          STATE.customPlans = await DB.getAllCustomPlans();
+          showToast('Template saved.', { type: 'success' });
+          drawOnboarding(container, opts);
+        } catch (err) {
+          console.error('Failed to save template', err);
+          showToast('Could not save that template.', { type: 'error' });
+        }
+      });
+    });
+  }
+
+  container.querySelectorAll('[data-role="use-template"]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const id = parseInt(btn.dataset.id, 10);
+      const tpl = (STATE.customPlans || []).find((p) => p.id === id);
+      if (!tpl) return;
+      openConfirmModal(`Replace your current training days with the "${tpl.name}" template?`, {
+        confirmLabel: 'Use Template',
+        onConfirm: () => {
+          onboardingDraft.customDays = tpl.customDays.map((d) => ({
+            dayLabel: d.dayLabel,
+            exercises: d.exercises.map((e) => Object.assign({}, e)),
+            addMuscle: d.exercises.length ? d.exercises[d.exercises.length - 1].muscleGroup : MUSCLE_GROUP_ORDER[0],
+            addEquip: 'all'
+          }));
+          drawOnboarding(container, opts);
+        }
+      });
+    });
+  });
+
+  container.querySelectorAll('[data-role="delete-template"]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const id = parseInt(btn.dataset.id, 10);
+      const tpl = (STATE.customPlans || []).find((p) => p.id === id);
+      openConfirmModal(`Delete the "${tpl ? tpl.name : 'this'}" template? This can't be undone.`, {
+        danger: true,
+        confirmLabel: 'Delete',
+        onConfirm: async () => {
+          try {
+            await DB.deleteCustomPlan(id);
+            STATE.customPlans = await DB.getAllCustomPlans();
+            showToast('Template deleted.', { type: 'success' });
+            drawOnboarding(container, opts);
+          } catch (err) {
+            console.error('Failed to delete template', err);
+            showToast('Could not delete that template.', { type: 'error' });
+          }
+        }
+      });
     });
   });
 
@@ -1123,7 +1594,7 @@ function renderDashboard(container) {
     const totalCompleted = completedSessions(STATE.sessions).length;
 
     const muscleKeys = MUSCLE_GROUP_ORDER.filter((m) => plan.weeklyTargets[m] !== undefined);
-    const statuses = muscleKeys.map((m) => classifyVolume(m, volumeTotals[m] || 0));
+    const statuses = muscleKeys.map((m) => classifyVolume(m, volumeTotals[m] || 0, effectiveLandmarks(m)));
     const overCount = statuses.filter((s) => s === 'over').length;
     const underCount = statuses.filter((s) => s === 'under').length;
     // "Check Volume" should only fire for things you can actually act on --
@@ -1142,9 +1613,9 @@ function renderDashboard(container) {
     const overallOk = overCount === 0 && !(!status.isDeload && isFinalDayOfWeek && underCount > 0);
 
     const meterRows = muscleKeys.map((m) => {
-      const lm = VOLUME_LANDMARKS[m];
+      const lm = effectiveLandmarks(m);
       const logged = volumeTotals[m] || 0;
-      const cls = classifyVolume(m, logged);
+      const cls = classifyVolume(m, logged, lm);
       const meta = statusMeta(cls);
       const pct = Math.min(100, Math.round((logged / lm.mrv) * 100));
       // Reference ticks at MEV and the start of MAV, shown even at 0% fill,
@@ -1369,11 +1840,20 @@ async function renderLog(container) {
 // ids are always prefixed "custom-") so it can never collide.
 const CREATE_NEW_EXERCISE_VALUE = '__create_new__';
 
-function exerciseOptionsHtml(muscleGroup, selectedId) {
-  const options = combinedExercisesForMuscle(muscleGroup).map((ex) =>
+// `equipmentFilter`, if given and not 'all', restricts the list to exercises
+// using that equipment type -- used by the two "add a new exercise" flows
+// (Log screen's Add Exercise card, onboarding's custom day builder) so a
+// home-gym lifter without a barbell isn't scrolling past machine/barbell
+// exercises to find something they can actually do. The swap-exercise
+// dropdown on an already-added entry intentionally doesn't take this filter.
+function exerciseOptionsHtml(muscleGroup, selectedId, equipmentFilter) {
+  let list = combinedExercisesForMuscle(muscleGroup);
+  if (equipmentFilter && equipmentFilter !== 'all') list = list.filter((ex) => ex.equipment === equipmentFilter);
+  const options = list.map((ex) =>
     `<option value="${ex.id}" ${ex.id === selectedId ? 'selected' : ''}>${escapeHtml(ex.name)} (${ex.equipment})</option>`
   ).join('');
-  return options + `<option value="${CREATE_NEW_EXERCISE_VALUE}">&#43; Create New Exercise&hellip;</option>`;
+  const empty = options ? '' : `<option value="" disabled selected>No exercises match this filter</option>`;
+  return empty + options + `<option value="${CREATE_NEW_EXERCISE_VALUE}">&#43; Create New Exercise&hellip;</option>`;
 }
 
 // Reusable "create a custom exercise" modal -- used from Settings' full
@@ -1603,6 +2083,17 @@ function drawLog(container, draft, status) {
     const signalClass = suggestion.signal === 'up' ? 'status-mav' : suggestion.signal === 'down' ? 'status-serious' : 'status-warning';
     const signalIcon = suggestion.signal === 'up' ? '&#9650;' : suggestion.signal === 'down' ? '&#9660;' : '&#9679;';
 
+    // Superset grouping -- a "simple tag" grouping, not a full interleaved-
+    // logging rebuild: each exercise still logs its sets top-to-bottom same
+    // as always, this only marks a chain of 2+ exercises as done back-to-
+    // back (bracketed visually) and skips the rest timer between them (see
+    // the toggle-set-done handler below), saving it for after the group's
+    // last exercise instead.
+    const nextEntry = draft.entries[ei + 1];
+    const isLinkedToPrev = !!entry.supersetLinked;
+    const isLinkedToNext = !!(nextEntry && nextEntry.supersetLinked);
+    const inSupersetGroup = isLinkedToPrev || isLinkedToNext;
+
     // Last time's numbers for this exercise, shown as grayed-out placeholder
     // text in each empty cell -- a glance at what you did before without it
     // being a real value you'd have to clear out to log something different.
@@ -1655,10 +2146,14 @@ function drawLog(container, draft, status) {
     const feedbackHtml = feedbackSummaryHtml(entry, ei);
 
     return `
-      <div class="ex-card ${entryDone ? 'ex-done' : ''}">
+      <div class="ex-card ${entryDone ? 'ex-done' : ''} ${inSupersetGroup ? 'superset-card' : ''} ${isLinkedToNext ? 'superset-lead' : ''}">
         <div class="ex-head">
+          ${inSupersetGroup ? `<div class="superset-badge">&#128279; Superset${isLinkedToPrev ? ' &middot; cont.' : ''}</div>` : ''}
           <div class="row between">
-            <span class="name">${entryDone ? '<span class="ex-done-check">&#10003;</span> ' : ''}${escapeHtml(ex ? ex.name : 'Unknown exercise')}</span>
+            <div class="row" style="gap:8px;min-width:0;flex:1">
+              ${EXERCISE_MEDIA[entry.exerciseId] ? `<button type="button" class="ex-thumb-btn" data-role="view-demo" data-exercise="${entry.exerciseId}" aria-label="View exercise demo"><img class="ex-thumb" src="${EXERCISE_MEDIA[entry.exerciseId]}" alt="" loading="lazy" onerror="this.closest('.ex-thumb-btn').remove()"></button>` : ''}
+              <span class="name">${entryDone ? '<span class="ex-done-check">&#10003;</span> ' : ''}${escapeHtml(ex ? ex.name : 'Unknown exercise')}</span>
+            </div>
             <div class="reorder-btns">
               <button type="button" class="ghost small" data-role="move-exercise" data-entry="${ei}" data-dir="-1" ${ei === 0 ? 'disabled' : ''} aria-label="Move up">&#9650;</button>
               <button type="button" class="ghost small" data-role="move-exercise" data-entry="${ei}" data-dir="1" ${ei === draft.entries.length - 1 ? 'disabled' : ''} aria-label="Move down">&#9660;</button>
@@ -1670,7 +2165,11 @@ function drawLog(container, draft, status) {
         </div>
         ${setsRows}
         <div class="ex-footer">
-          <button type="button" class="secondary small" data-role="add-set" data-entry="${ei}">+ Add Set</button>
+          <div class="ex-footer-actions">
+            <button type="button" class="secondary small" data-role="add-set" data-entry="${ei}">+ Add Set</button>
+            <button type="button" class="secondary small" data-role="open-warmup-calc" data-entry="${ei}">Warm-up</button>
+            ${nextEntry ? `<button type="button" class="secondary small" data-role="toggle-superset-link" data-entry="${ei}">${isLinkedToNext ? 'Unlink Next' : '&#128279; Link Next'}</button>` : ''}
+          </div>
           <button type="button" class="ex-timer-badge" data-role="ex-timer-badge" data-entry="${ei}" style="display:${(TIMER.running && TIMER.activeEntryIndex === ei) ? 'inline-flex' : 'none'}" aria-label="Rest timer, tap to cancel">
             <span class="ex-timer-icon">&#9201;</span><span class="ex-timer-time" data-role="ex-timer-time">${formatTime(TIMER.remaining)}</span>
           </button>
@@ -1694,10 +2193,15 @@ function drawLog(container, draft, status) {
     const statusHtml = current
       ? `<span class="chip chip-${current} active small-tag">${VOLUME_CHIP_LABELS[current]}</span>`
       : `<span class="muted small">${allDone ? 'Tap to answer' : 'Finish all exercises first'}</span>`;
+    // Two sessions running with the same "too much"/"too little" answer for
+    // this muscle is a real trend, not a one-off -- surface it right where
+    // the check-in itself lives instead of leaving it buried in history.
+    const trendNote = getVolumeFeedbackNote(m, priorSessions);
     return `<button type="button" class="muscle-checkin-row ${allDone ? 'clickable' : ''}" data-role="muscle-checkin-row" data-group="${m}" ${!allDone ? 'disabled' : ''}>
       <span class="muscle-checkin-label-text">${escapeHtml(VOLUME_LANDMARKS[m].label)}</span>
       ${statusHtml}
-    </button>`;
+    </button>
+    ${trendNote ? `<p class="small muted volume-trend-note" data-role="volume-trend-note">${trendNote.direction === 'up' ? '&#9650;' : '&#9660;'} ${escapeHtml(trendNote.text)}</p>` : ''}`;
   }).join('');
 
   const addExerciseOptions = MUSCLE_GROUP_ORDER.map((m) => `<option value="${m}">${VOLUME_LANDMARKS[m].label}</option>`).join('');
@@ -1727,9 +2231,18 @@ function drawLog(container, draft, status) {
 
     <div class="card">
       <h2>Add Exercise</h2>
-      <div class="field">
-        <label>Muscle Group</label>
-        <select id="addMuscleSelect">${addExerciseOptions}</select>
+      <div class="row">
+        <div class="field" style="flex:1">
+          <label>Muscle Group</label>
+          <select id="addMuscleSelect">${addExerciseOptions}</select>
+        </div>
+        <div class="field" style="flex:1">
+          <label>Equipment</label>
+          <select id="addEquipmentFilter">
+            <option value="all">All Equipment</option>
+            ${EQUIPMENT_TYPES.map((eq) => `<option value="${eq}">${eq[0].toUpperCase() + eq.slice(1)}</option>`).join('')}
+          </select>
+        </div>
       </div>
       <div class="field">
         <label>Exercise</label>
@@ -1829,6 +2342,28 @@ function wireLogEvents(container, draft) {
     });
   });
 
+  container.querySelectorAll('[data-role="view-demo"]').forEach((btn) => {
+    btn.addEventListener('click', () => openExerciseDemoModal(btn.dataset.exercise));
+  });
+
+  container.querySelectorAll('[data-role="toggle-superset-link"]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const ei = parseInt(btn.dataset.entry, 10);
+      const nextEntry = draft.entries[ei + 1];
+      if (!nextEntry) return;
+      nextEntry.supersetLinked = !nextEntry.supersetLinked;
+      scheduleSave();
+      drawLog(container, draft, mesoStatus(STATE.meso, STATE.sessions));
+    });
+  });
+
+  container.querySelectorAll('[data-role="open-warmup-calc"]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const ei = parseInt(btn.dataset.entry, 10);
+      openWarmupCalcModal(draft.entries[ei], ei, container, draft);
+    });
+  });
+
   container.querySelectorAll('[data-role="remove-set"]').forEach((btn) => {
     btn.addEventListener('click', () => {
       const ei = parseInt(btn.dataset.entry, 10);
@@ -1920,11 +2455,21 @@ function wireLogEvents(container, draft) {
       // the exercise's last one, in which case you're moving on, so the timer
       // follows to the next exercise block instead (falling back to the same
       // card if this was the last exercise in the workout).
+      //
+      // Exception: superset-linked exercises share one rest period for the
+      // whole group, taken after the group's last exercise -- so if this
+      // entry just finished and the NEXT entry continues the same superset
+      // chain, skip starting the timer here; you're meant to move straight
+      // into that next exercise with no rest in between.
       if (justCompleted) {
+        const nextEntry = draft.entries[ei + 1];
+        const movingWithinSuperset = nowEntryDone && nextEntry && !!nextEntry.supersetLinked;
         TIMER.activeEntryIndex = nowEntryDone
           ? (ei + 1 < draft.entries.length ? ei + 1 : ei)
           : ei;
-        restartRestTimer();
+        if (!movingWithinSuperset) {
+          restartRestTimer();
+        }
       }
 
       drawLog(container, draft, mesoStatus(STATE.meso, STATE.sessions));
@@ -1961,9 +2506,15 @@ function wireLogEvents(container, draft) {
 
   const addMuscleSelect = container.querySelector('#addMuscleSelect');
   const addExerciseSelect = container.querySelector('#addExerciseSelect');
+  const addEquipmentFilter = container.querySelector('#addEquipmentFilter');
   if (addMuscleSelect) {
     addMuscleSelect.addEventListener('change', () => {
-      addExerciseSelect.innerHTML = exerciseOptionsHtml(addMuscleSelect.value, null);
+      addExerciseSelect.innerHTML = exerciseOptionsHtml(addMuscleSelect.value, null, addEquipmentFilter ? addEquipmentFilter.value : null);
+    });
+  }
+  if (addEquipmentFilter) {
+    addEquipmentFilter.addEventListener('change', () => {
+      addExerciseSelect.innerHTML = exerciseOptionsHtml(addMuscleSelect.value, null, addEquipmentFilter.value);
     });
   }
   if (addExerciseSelect) {
@@ -1973,6 +2524,7 @@ function wireLogEvents(container, draft) {
         addMuscleSelect ? addMuscleSelect.value : null,
         (newEx) => {
           if (addMuscleSelect) addMuscleSelect.value = newEx.muscleGroup;
+          if (addEquipmentFilter) addEquipmentFilter.value = 'all';
           addExerciseSelect.innerHTML = exerciseOptionsHtml(newEx.muscleGroup, newEx.id);
         },
         () => { addExerciseSelect.value = addExerciseSelect.querySelector('option:not([value="' + CREATE_NEW_EXERCISE_VALUE + '"])').value; }
@@ -2273,7 +2825,37 @@ function drawProgress(container, selectedExerciseId) {
       <span class="trailing num">${escapeHtml(p.weight)}${escapeHtml(STATE.settings.units)} &times; ${escapeHtml(p.reps)}${p.rir !== '' && p.rir !== null && p.rir !== undefined ? ` @ RIR ${escapeHtml(p.rir)}` : ''}</span>
     </div>`).join('');
 
+  const lifetime = computeLifetimeStats(STATE.sessions);
+  const CONSISTENCY_WEEKS = 18;
+  const consistencyGrid = computeConsistencyGrid(STATE.sessions, CONSISTENCY_WEEKS);
+
   const body = `
+    <div class="card">
+      <h2>Lifetime Stats</h2>
+      ${lifetime.totalWorkouts ? `
+      <div class="stat-row">
+        <div class="stat-tile"><div class="val">${lifetime.totalWorkouts}</div><div class="lbl">Workouts</div></div>
+        <div class="stat-tile"><div class="val">${lifetime.totalSets}</div><div class="lbl">Sets Logged</div></div>
+      </div>
+      <div class="stat-row" style="margin-bottom:0">
+        <div class="stat-tile"><div class="val">${Math.round(lifetime.totalVolume).toLocaleString()}</div><div class="lbl">${escapeHtml(STATE.settings.units)} Lifted</div></div>
+        <div class="stat-tile"><div class="val">${lifetime.longestStreak}</div><div class="lbl">Best Streak (wks)</div></div>
+      </div>` : emptyState('Log your first workout to start building lifetime stats.')}
+    </div>
+    <div class="card">
+      <h2>Training Consistency</h2>
+      <p class="small muted" style="margin:-6px 0 10px">Last ${CONSISTENCY_WEEKS} weeks, Monday&ndash;Sunday per column.</p>
+      <div class="heatmap-scroll">
+        <div class="heatmap-grid">
+          ${consistencyGrid.map((col) => `<div class="heatmap-col">${col.map((cell) =>
+            cell.isFuture
+              ? '<div class="heatmap-cell heatmap-future"></div>'
+              : `<div class="heatmap-cell ${cell.trained ? 'trained' : ''}" title="${escapeHtml(new Date(cell.date + 'T00:00:00').toLocaleDateString())}${cell.trained ? ' — trained' : ''}"></div>`
+          ).join('')}</div>`).join('')}
+        </div>
+      </div>
+      <div class="heatmap-legend"><span class="heatmap-legend-dot"></span> Rest day &nbsp; <span class="heatmap-legend-dot trained"></span> Trained day</div>
+    </div>
     <div class="card">
       <h2>Session History</h2>
       ${historyRows || emptyState('No completed workouts yet.')}
@@ -2397,6 +2979,44 @@ function bodyweightSparklineHtml(points, units) {
 // ---------------------------------------------------------------------------
 // Settings
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// CSV export -- a second, human/spreadsheet-friendly export alongside the
+// JSON backup. One row per logged set (not per session), since that's the
+// grain most people actually want when pulling this into Excel/Sheets to
+// build their own pivot tables or charts. The JSON backup stays the thing
+// you'd restore from; this is read-only, export-only.
+// ---------------------------------------------------------------------------
+function csvEscape(value) {
+  const str = value === null || value === undefined ? '' : String(value);
+  return /[",\r\n]/.test(str) ? '"' + str.replace(/"/g, '""') + '"' : str;
+}
+
+function buildWorkoutCsv(sessions) {
+  const headers = ['Date', 'Day', 'Exercise', 'Muscle Group', 'Set', 'Warmup', 'Weight', 'Reps', 'RIR', 'Tempo', 'Notes'];
+  const rows = [headers];
+  completedSessions(sessions)
+    .slice()
+    .sort((a, b) => (a.date < b.date ? -1 : 1))
+    .forEach((session) => {
+      const dateStr = new Date(session.date).toLocaleDateString();
+      (session.entries || []).forEach((entry) => {
+        const ex = exerciseById(entry.exerciseId);
+        const exName = ex ? ex.name : entry.exerciseId;
+        const muscleLabel = VOLUME_LANDMARKS[entry.muscleGroup] ? VOLUME_LANDMARKS[entry.muscleGroup].label : entry.muscleGroup;
+        let workingIndex = 0;
+        (entry.sets || []).forEach((set) => {
+          if (!set.warmup) workingIndex++;
+          rows.push([
+            dateStr, session.dayLabel || '', exName, muscleLabel,
+            set.warmup ? 'W' : String(workingIndex), set.warmup ? 'Yes' : 'No',
+            set.weight, set.reps, set.rir, set.tempo || '', set.notes || ''
+          ]);
+        });
+      });
+    });
+  return rows.map((r) => r.map(csvEscape).join(',')).join('\r\n');
+}
+
 function renderSettings(container) {
   const s = STATE.settings;
   const currentTheme = s.theme || 'dark';
@@ -2433,6 +3053,11 @@ function renderSettings(container) {
       <h2>Help</h2>
       <p class="small muted" style="margin-top:-4px">New to terms like MEV or RIR? Take the quick tour again.</p>
       <button type="button" class="secondary block" data-role="replay-walkthrough">Replay App Tour</button>
+    </div>
+
+    <div class="card">
+      <h2>Tools</h2>
+      <button type="button" class="secondary block" data-role="open-plate-calc">&#129001; Plate Calculator</button>
     </div>
 
     <div class="card">
@@ -2523,6 +3148,25 @@ function renderSettings(container) {
       <button class="block" id="saveSettingsBtn">Save Preferences</button>
     </div>
 
+    <details class="card">
+      <summary class="card-summary">Volume Landmarks (Advanced)</summary>
+      <p class="small muted" style="margin-top:10px">Retune the weekly-set numbers used to color-code the dashboard's volume meters and "Check Volume" flag, per muscle group. This only changes how logged sets are read here -- it does not change the weekly set targets your plan was built around. Defaults come from published hypertrophy guidelines and are a reasonable starting point for most lifters.</p>
+      ${MUSCLE_GROUP_ORDER.map((m) => {
+        const lm = effectiveLandmarks(m);
+        return `<div class="landmark-row" data-muscle="${m}" style="margin-top:12px">
+          <div class="small" style="font-weight:700;margin-bottom:4px">${escapeHtml(VOLUME_LANDMARKS[m].label)}</div>
+          <div class="row" style="gap:6px">
+            <div class="field" style="flex:1"><label>MEV</label><input type="number" min="0" class="lm-input" data-field="mev" value="${lm.mev}"></div>
+            <div class="field" style="flex:1"><label>MAV Lo</label><input type="number" min="0" class="lm-input" data-field="mavLow" value="${lm.mavLow}"></div>
+            <div class="field" style="flex:1"><label>MAV Hi</label><input type="number" min="0" class="lm-input" data-field="mavHigh" value="${lm.mavHigh}"></div>
+            <div class="field" style="flex:1"><label>MRV</label><input type="number" min="0" class="lm-input" data-field="mrv" value="${lm.mrv}"></div>
+          </div>
+        </div>`;
+      }).join('')}
+      <button type="button" class="secondary block" id="saveLandmarksBtn" style="margin-top:12px">Save Volume Landmarks</button>
+      <button type="button" class="ghost block" id="resetLandmarksBtn">Reset All to Defaults</button>
+    </details>
+
     <div class="card">
       <h2>Body Weight</h2>
       <div class="bodyweight-row">
@@ -2538,6 +3182,8 @@ function renderSettings(container) {
       <h2>Backup</h2>
       <p class="small muted">Your data lives in this browser only. Export a backup occasionally in case Chrome ever clears its storage.</p>
       <button class="block secondary" id="exportBtn">Export Backup (.json)</button>
+      <button class="block secondary" id="exportCsvBtn" style="margin-top:8px">Export Set Log (.csv)</button>
+      <p class="small muted" style="margin-top:6px">The .json backup is what you'd restore from. The .csv is every logged set, one row each, for opening in Excel or Sheets.</p>
       <div style="margin-top:8px">
         <label>Import Backup</label>
         <input type="file" id="importFile" accept="application/json">
@@ -2557,6 +3203,9 @@ function renderSettings(container) {
 
   const replayBtn = container.querySelector('[data-role="replay-walkthrough"]');
   if (replayBtn) replayBtn.addEventListener('click', () => openWalkthroughModal({ replay: true }));
+
+  const plateCalcBtn = container.querySelector('[data-role="open-plate-calc"]');
+  if (plateCalcBtn) plateCalcBtn.addEventListener('click', openPlateCalculatorModal);
 
   container.querySelectorAll('#themeToggle .theme-toggle-btn').forEach(btn => {
     btn.addEventListener('click', async () => {
@@ -2648,6 +3297,58 @@ function renderSettings(container) {
     }
   });
 
+  const saveLandmarksBtn = container.querySelector('#saveLandmarksBtn');
+  if (saveLandmarksBtn) {
+    saveLandmarksBtn.addEventListener('click', async () => {
+      const overrides = {};
+      let invalid = false;
+      container.querySelectorAll('.landmark-row').forEach((row) => {
+        const m = row.dataset.muscle;
+        const get = (field) => parseFloat(row.querySelector(`.lm-input[data-field="${field}"]`).value);
+        const mev = get('mev'), mavLow = get('mavLow'), mavHigh = get('mavHigh'), mrv = get('mrv');
+        if (![mev, mavLow, mavHigh, mrv].every((n) => isFinite(n) && n >= 0)) { invalid = true; return; }
+        if (!(mev <= mavLow && mavLow <= mavHigh && mavHigh <= mrv)) { invalid = true; return; }
+        const def = VOLUME_LANDMARKS[m];
+        // Only store a muscle's override when it actually differs from the
+        // stock default -- keeps the saved object small and means "Reset"
+        // has nothing left to clear once everything matches defaults again.
+        if (mev !== def.mev || mavLow !== def.mavLow || mavHigh !== def.mavHigh || mrv !== def.mrv) {
+          overrides[m] = { mev, mavLow, mavHigh, mrv };
+        }
+      });
+      if (invalid) { openMessageModal('Each row needs MEV ≤ MAV Lo ≤ MAV Hi ≤ MRV, all 0 or higher.'); return; }
+      try {
+        await DB.saveSettings({ volumeLandmarkOverrides: overrides });
+        STATE.settings = await DB.getSettings();
+        showToast('Volume landmarks saved.', { type: 'success' });
+        renderSettings(container);
+      } catch (err) {
+        console.error('Failed to save volume landmarks', err);
+        showToast('Could not save volume landmarks.', { type: 'error' });
+      }
+    });
+  }
+
+  const resetLandmarksBtn = container.querySelector('#resetLandmarksBtn');
+  if (resetLandmarksBtn) {
+    resetLandmarksBtn.addEventListener('click', () => {
+      openConfirmModal('Reset every muscle group’s volume landmarks back to the defaults?', {
+        confirmLabel: 'Reset',
+        onConfirm: async () => {
+          try {
+            await DB.saveSettings({ volumeLandmarkOverrides: {} });
+            STATE.settings = await DB.getSettings();
+            showToast('Volume landmarks reset to defaults.', { type: 'success' });
+            renderSettings(container);
+          } catch (err) {
+            console.error('Failed to reset volume landmarks', err);
+            showToast('Could not reset volume landmarks.', { type: 'error' });
+          }
+        }
+      });
+    });
+  }
+
   const signOutBtn = container.querySelector('[data-role="sign-out"]');
   if (signOutBtn) {
     signOutBtn.addEventListener('click', () => {
@@ -2728,6 +3429,26 @@ function renderSettings(container) {
     } catch (err) {
       console.error('Failed to export backup', err);
       showToast('Could not export a backup.', { type: 'error' });
+    }
+  });
+
+  container.querySelector('#exportCsvBtn').addEventListener('click', () => {
+    try {
+      if (!completedSessions(STATE.sessions).length) { openMessageModal('No completed workouts to export yet.'); return; }
+      const csv = buildWorkoutCsv(STATE.sessions);
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `hypertrack-sets-${new Date().toISOString().slice(0, 10)}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      showToast('Set log exported.', { type: 'success' });
+    } catch (err) {
+      console.error('Failed to export CSV', err);
+      showToast('Could not export the CSV.', { type: 'error' });
     }
   });
 

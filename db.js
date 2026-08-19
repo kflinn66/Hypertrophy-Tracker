@@ -115,7 +115,8 @@ const DB = {
       restTimerSeconds: 105,
       onboarded: false,
       theme: 'dark',
-      goal: 'hypertrophy'
+      goal: 'hypertrophy',
+      volumeLandmarkOverrides: {}
     };
   },
   async saveSettings(data) {
@@ -133,6 +134,14 @@ const DB = {
   async getAllCustomPlans() {
     const db = await openDB();
     return promisify(tx(db, 'customPlans', 'readonly').getAll());
+  },
+  async getCustomPlan(id) {
+    const db = await openDB();
+    return promisify(tx(db, 'customPlans', 'readonly').get(id));
+  },
+  async deleteCustomPlan(id) {
+    const db = await openDB();
+    return promisify(tx(db, 'customPlans', 'readwrite').delete(id));
   },
 
   // ---------------- custom exercises ----------------

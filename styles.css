@@ -42,12 +42,21 @@
   font-variant-numeric: tabular-nums;
 }
 
-:root[data-theme="light"],
-:root[data-theme="system"] {
+:root[data-theme="light"] {
   color-scheme: light;
 }
+/* "System" was forcing color-scheme:light unconditionally regardless of the
+   OS's actual preference, even though the color TOKENS below correctly
+   follow prefers-color-scheme. That mismatch only affects native browser
+   chrome (form controls, scrollbars) -- the app's own colors were always
+   right -- but it's a real inconsistency: pair color-scheme with the same
+   media query the tokens already use, so a system-dark OS gets a
+   native-dark scrollbar/control set instead of a forced-light one. The
+   default at the top of this file (color-scheme: dark) already covers the
+   "system prefers dark" case with no override needed here. */
 @media (prefers-color-scheme: light) {
   :root[data-theme="system"] {
+    color-scheme: light;
     --page:            #f9f9f7;
     --surface:         #ffffff;
     --surface-raised:  #f0efec;
@@ -239,6 +248,19 @@ html, body {
   color: var(--muted);
   font-weight: 800;
 }
+/* A <details class="card"> used for collapsible advanced sections (e.g.
+   Volume Landmarks) -- its <summary> stands in for the card's h2 heading,
+   plus the disclosure marker. */
+.card summary.card-summary {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  font-weight: 800;
+  cursor: pointer;
+  list-style: revert;
+}
+.card summary.card-summary::marker { color: var(--muted); }
 .row { display: flex; gap: 8px; align-items: center; }
 .row.between { justify-content: space-between; }
 .muted { color: var(--muted); }
@@ -512,6 +534,7 @@ input.cell-input.secondary-input { font-size: 12px; font-weight: 400; }
   gap: 8px;
   padding: 10px 14px 14px;
 }
+.ex-footer-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .ex-timer-badge {
   flex-shrink: 0;
   align-items: center;
@@ -556,6 +579,26 @@ hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
 .reorder-btns { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
 .reorder-btns button.ghost.small { padding: 4px 7px; font-size: 10px; }
 .ex-card.ex-done { border-color: color-mix(in srgb, var(--good) 45%, var(--border)); }
+/* Superset grouping -- a light accent border brackets every card in the
+   group, and the gap between a card and the next one it's linked to is
+   pulled in so the group visually reads as one connected unit rather than
+   separate cards that happen to be adjacent. */
+.ex-card.superset-card { border-left: 3px solid var(--accent); }
+.ex-card.superset-lead { margin-bottom: 4px; }
+.superset-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  padding: 2px 8px;
+  border-radius: 20px;
+  margin-bottom: 8px;
+}
 .ex-done-check { color: var(--good); font-weight: 900; }
 .signal-dot { font-size: 8px; vertical-align: 2px; margin-right: 2px; }
 
@@ -687,6 +730,70 @@ hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
 @keyframes modal-slide-up { from { transform: translateY(16px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
 .modal-card h2 { margin: 0 0 4px; font-size: 16px; font-weight: 700; padding-right: 30px; }
 .modal-card > .muted.small { margin: 0 0 14px; }
+.ex-thumb-btn {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: var(--surface-raised);
+}
+.ex-thumb { width: 100%; height: 100%; object-fit: cover; display: block; }
+.ex-demo-img {
+  width: 100%;
+  min-height: 120px;
+  max-height: 45vh;
+  object-fit: contain;
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+}
+/* ---------------- Training consistency heatmap (Progress tab) ---------------- */
+.heatmap-scroll { overflow-x: auto; padding-bottom: 2px; }
+.heatmap-grid { display: flex; gap: 3px; width: max-content; }
+.heatmap-col { display: flex; flex-direction: column; gap: 3px; }
+.heatmap-cell {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+}
+.heatmap-cell.trained { background: var(--accent); border-color: var(--accent); }
+.heatmap-cell.heatmap-future { background: transparent; border-color: transparent; }
+.heatmap-legend { display: flex; align-items: center; gap: 4px; margin-top: 10px; font-size: 11px; color: var(--muted); }
+.heatmap-legend-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+}
+.heatmap-legend-dot.trained { background: var(--accent); border-color: var(--accent); }
+
+.plate-result { min-height: 20px; }
+.plate-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+.plate-row:last-of-type { border-bottom: none; }
+.plate-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 52px;
+  padding: 4px 10px;
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  font-weight: 800;
+  background: color-mix(in srgb, var(--accent) 16%, var(--surface-raised));
+  color: var(--accent);
+}
 .modal-close {
   position: absolute;
   top: 14px; right: 14px;

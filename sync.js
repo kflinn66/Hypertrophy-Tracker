@@ -82,6 +82,15 @@ const Sync = {
     this._userId = null;
   },
 
+  // Used by the dedicated password-reset screen (app.js renderPasswordResetScreen)
+  // once someone lands here from a Supabase recovery-link redirect -- the
+  // redirect itself already leaves them in a real (temporary) session, so
+  // this is a normal authenticated update, not a separate reset-token flow.
+  async updatePassword(newPassword) {
+    const { error } = await this.client.auth.updateUser({ password: newPassword });
+    if (error) throw error;
+  },
+
   // ---------------------------------------------------------------------
   // Per-write mirroring -- called from the DB.* wrapper below, fire-and-
   // forget from the caller's point of view.
@@ -182,10 +191,15 @@ const Sync = {
     ]);
     if (remoteRes.error) throw remoteRes.error;
     if (remoteRes.data && remoteRes.data.data) {
-      // Merge, preferring locally-set fields only where the cloud has never
-      // seen this device's settings at all (empty remote handled below);
-      // once both exist we keep the local copy authoritative to avoid
-      // silently overwriting a preference you just changed on this device.
+      // Pull remote settings down, but only onto a device that hasn't been
+      // set up yet (never completed onboarding locally) -- that's exactly
+      // "signing into a brand-new device" and importing the other device's
+      // units/RIR target/rest timer/etc. is the whole point. A device that
+      // already has its own real settings never gets silently overwritten
+      // by whatever's in the cloud, even if they differ.
+      if (!local.onboarded) {
+        await DB.saveSettings(Object.assign({}, remoteRes.data.data, { id: 'main' }));
+      }
     } else {
       await this.pushSettings(local);
     }
@@ -243,6 +257,7 @@ window.Sync = Sync;
   wrapDelete('deleteCustomExercise', 'customExercises');
 
   wrapAdd('addCustomPlan', 'customPlans');
+  wrapDelete('deleteCustomPlan', 'customPlans');
 
   const origSaveSettings = DB.saveSettings.bind(DB);
   DB.saveSettings = async function (data) {
