@@ -141,6 +141,28 @@ html, body {
   margin-top: 3px;
   font-weight: 600;
 }
+/* Lives in the appbar's own empty right-hand slot rather than as a floating
+   fixed-position button -- a prior bottom-right feedback-style button (see
+   the #installBtn comment below) collided with the rest timer, the Discard
+   Workout button, and modal buttons. Sitting inside .appbar means it scrolls
+   with the header (never overlaps page content) and is automatically hidden
+   behind any open modal for free, since .appbar's z-index (10) sits below
+   .modal-overlay's (100) -- no extra "hide during modal" CSS needed. */
+.feedback-btn {
+  flex-shrink: 0;
+  align-self: flex-start;
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.feedback-btn:active { background: var(--surface-raised); color: var(--text); }
 
 /* ---------------- Bottom nav ---------------- */
 .bottomnav {

@@ -69,6 +69,85 @@ async function shareApp() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Feedback -- posts straight into a Google Form (which feeds a linked Sheet
+// in Drive) via a background no-cors fetch. No backend, no API key: this is
+// Google's own intended pattern for anonymous form submission. The response
+// is opaque under no-cors, so success can't be confirmed programmatically --
+// the toast below is shown optimistically once the request is sent.
+const FEEDBACK_FORM_URL = 'https://docs.google.com/forms/d/e/1FAIpQLSfMyAo_UjJbkWmXo4_NLpA_hPOK7HmX3I_umUG3bJpgtTF3zA/formResponse';
+const FEEDBACK_FIELDS = { text: 'entry.704373824', category: 'entry.1426497109', email: 'entry.1357123636' };
+
+function openFeedbackModal() {
+  closeAnyModal();
+  const modal = document.createElement('div');
+  modal.className = 'modal-overlay';
+  modal.innerHTML = `
+    <div class="modal-card">
+      <h2>Send Feedback</h2>
+      <p class="muted small">Bug reports, feature ideas, or anything else on your mind about the app.</p>
+      <div class="field">
+        <label>Your feedback</label>
+        <textarea id="fbText" rows="4" placeholder="What's on your mind?"></textarea>
+      </div>
+      <div class="row">
+        <div class="field" style="flex:1">
+          <label>Category</label>
+          <select id="fbCategory">
+            <option value="Bug">Bug</option>
+            <option value="Idea">Idea</option>
+            <option value="Question">Question</option>
+            <option value="Other">Other</option>
+          </select>
+        </div>
+      </div>
+      <div class="field">
+        <label>Your email (optional, if you want a reply)</label>
+        <input type="email" id="fbEmail" placeholder="you@example.com" value="${escapeHtml(STATE.authEmail || '')}">
+      </div>
+      <div class="row">
+        <button type="button" class="secondary block" data-role="fb-cancel">Cancel</button>
+        <button type="button" class="block" data-role="fb-submit">Send</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  const textEl = modal.querySelector('#fbText');
+  textEl.focus();
+  const cancel = () => modal.remove();
+  modal.querySelector('[data-role="fb-cancel"]').addEventListener('click', cancel);
+  modal.addEventListener('click', (e) => { if (e.target === modal) cancel(); });
+  modal.querySelector('[data-role="fb-submit"]').addEventListener('click', async () => {
+    const text = textEl.value.trim();
+    if (!text) { openMessageModal('Add a note before sending -- even a sentence helps.'); return; }
+    const category = modal.querySelector('#fbCategory').value;
+    const email = modal.querySelector('#fbEmail').value.trim();
+    modal.remove();
+    await submitFeedback(text, category, email);
+  });
+}
+
+async function submitFeedback(text, category, email) {
+  try {
+    const body = new URLSearchParams();
+    body.set(FEEDBACK_FIELDS.text, text);
+    body.set(FEEDBACK_FIELDS.category, category);
+    body.set(FEEDBACK_FIELDS.email, email);
+    await fetch(FEEDBACK_FORM_URL, {
+      method: 'POST',
+      mode: 'no-cors',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body
+    });
+    // no-cors responses are opaque -- this can't distinguish success from a
+    // network failure, so it optimistically assumes the request went through
+    // (which matches the reliability of a normal Google Form submission).
+    showToast('Thanks for the feedback!', { type: 'success' });
+  } catch (err) {
+    console.error('Feedback submission failed', err);
+    showToast('Could not send feedback -- check your connection and try again.', { type: 'error' });
+  }
+}
+
 // Generic replacements for the native confirm()/alert() -- same modal
 // look-and-feel as the exercise/muscle check-in popups so a destructive
 // action doesn't suddenly pop an unstyled browser dialog.
@@ -319,6 +398,13 @@ async function startApp() {
 
   window.addEventListener('hashchange', () => renderRoute());
   renderRoute();
+
+  // Delegated once on the persistent #app container (whose innerHTML gets
+  // swapped on every route change) rather than rewired per-render, so the
+  // header's feedback button keeps working across every screen for free.
+  document.getElementById('app').addEventListener('click', (e) => {
+    if (e.target.closest('[data-role="open-feedback"]')) openFeedbackModal();
+  });
 }
 
 async function boot() {
@@ -442,6 +528,7 @@ function appShell(bodyHtml, activeRoute, title, subtitle) {
         <h1>${escapeHtml(title)}</h1>
         ${subtitle ? `<div class="subtitle">${escapeHtml(subtitle)}</div>` : ''}
       </div>
+      ${STATE.settings.onboarded ? `<button type="button" class="feedback-btn" data-role="open-feedback" aria-label="Send Feedback" title="Send Feedback"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></button>` : ''}
     </div>
     <div class="view">${bodyHtml}</div>
     ${STATE.settings.onboarded ? bottomNavHtml(activeRoute) : ''}
